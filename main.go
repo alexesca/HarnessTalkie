@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +29,14 @@ type Identity struct {
 	SessionToken string `json:"session_token,omitempty"`
 }
 type Profile struct {
-	DisplayName string `json:"display_name"`
-	Bio         string `json:"bio,omitempty"`
+	DisplayName         string   `json:"display_name"`
+	Bio                 string   `json:"bio,omitempty"`
+	Repository          string   `json:"repository,omitempty"`
+	Harness             string   `json:"harness,omitempty"`
+	Capabilities        []string `json:"capabilities,omitempty"`
+	CurrentWork         string   `json:"current_work,omitempty"`
+	Limitations         string   `json:"limitations,omitempty"`
+	CollaborationTopics []string `json:"collaboration_topics,omitempty"`
 }
 type Presence struct {
 	IdentityID string    `json:"identity_id"`
@@ -40,15 +47,91 @@ type Contact struct {
 	IdentityID  string `json:"identity_id"`
 	DisplayName string `json:"display_name,omitempty"`
 }
+type Participant struct {
+	IdentityID          string    `json:"identity_id"`
+	Handle              string    `json:"handle,omitempty"`
+	DisplayName         string    `json:"display_name"`
+	Bio                 string    `json:"bio,omitempty"`
+	Repository          string    `json:"repository,omitempty"`
+	Harness             string    `json:"harness,omitempty"`
+	Capabilities        []string  `json:"capabilities,omitempty"`
+	CurrentWork         string    `json:"current_work,omitempty"`
+	Limitations         string    `json:"limitations,omitempty"`
+	CollaborationTopics []string  `json:"collaboration_topics,omitempty"`
+	Online              bool      `json:"online"`
+	LastSeen            time.Time `json:"last_seen"`
+}
+type ParticipantQuery struct {
+	Query       string `json:"query,omitempty"`
+	Repository  string `json:"repository,omitempty"`
+	Harness     string `json:"harness,omitempty"`
+	Capability  string `json:"capability,omitempty"`
+	CurrentWork string `json:"current_work,omitempty"`
+}
+type Invitation struct {
+	Group     Group     `json:"group"`
+	InvitedBy string    `json:"invited_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
 type Message struct {
-	ID          string    `json:"id"`
-	SenderID    string    `json:"sender_id"`
-	RecipientID string    `json:"recipient_id,omitempty"`
-	GroupID     string    `json:"group_id,omitempty"`
-	Content     string    `json:"content"`
-	Sequence    uint64    `json:"sequence"`
-	CreatedAt   time.Time `json:"created_at"`
-	Read        bool      `json:"read,omitempty"`
+	ID              string    `json:"id"`
+	SenderID        string    `json:"sender_id"`
+	RecipientID     string    `json:"recipient_id,omitempty"`
+	GroupID         string    `json:"group_id,omitempty"`
+	Content         string    `json:"content"`
+	Sequence        uint64    `json:"sequence"`
+	CreatedAt       time.Time `json:"created_at"`
+	Read            bool      `json:"read,omitempty"`
+	ConversationID  string    `json:"conversation_id,omitempty"`
+	ReplyTo         string    `json:"reply_to,omitempty"`
+	ClientMessageID string    `json:"client_message_id,omitempty"`
+}
+type SendDMRequest struct {
+	To              string `json:"to"`
+	Content         string `json:"content"`
+	ReplyTo         string `json:"reply_to,omitempty"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+}
+type MessageQuery struct {
+	With          string `json:"with,omitempty"`
+	AfterSequence uint64 `json:"after_sequence,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
+	UnreadOnly    bool   `json:"unread_only,omitempty"`
+}
+type MessagePage struct {
+	Messages   []Message `json:"messages"`
+	NextCursor uint64    `json:"next_cursor"`
+	More       bool      `json:"more"`
+}
+type EventQuery struct {
+	AfterSequence uint64 `json:"after_sequence,omitempty"`
+	WaitMS        int    `json:"wait_ms,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
+	Ack           bool   `json:"ack,omitempty"`
+}
+type ActivityEvent struct {
+	Type      string    `json:"type"`
+	ID        string    `json:"id"`
+	ActorID   string    `json:"actor_id"`
+	TargetID  string    `json:"target_id,omitempty"`
+	Sequence  uint64    `json:"sequence"`
+	CreatedAt time.Time `json:"created_at"`
+	Summary   string    `json:"summary,omitempty"`
+	Message   *Message  `json:"message,omitempty"`
+}
+type EventBatch struct {
+	Events     []ActivityEvent `json:"events"`
+	NextCursor uint64          `json:"next_cursor"`
+	More       bool            `json:"more"`
+}
+type Bootstrap struct {
+	Identity     Identity      `json:"identity"`
+	Participants []Participant `json:"participants,omitempty"`
+	Invites      []Invitation  `json:"invites,omitempty"`
+	Groups       []Group       `json:"groups,omitempty"`
+	RecentPosts  []Post        `json:"recent_posts,omitempty"`
+	UnreadDMs    int           `json:"unread_dms"`
+	Cursor       uint64        `json:"cursor"`
 }
 type Group struct {
 	ID      string   `json:"id"`
@@ -83,16 +166,18 @@ type ResumeResult struct {
 
 type identityRecord struct {
 	Identity
-	Profile  Profile         `json:"profile"`
-	Name     string          `json:"name"`
-	Token    string          `json:"token"`
-	LastSeen time.Time       `json:"last_seen"`
-	Contacts map[string]bool `json:"contacts"`
+	Profile    Profile         `json:"profile"`
+	Name       string          `json:"name"`
+	Token      string          `json:"token"`
+	LastSeen   time.Time       `json:"last_seen"`
+	LastActive time.Time       `json:"last_active"`
+	Contacts   map[string]bool `json:"contacts"`
 }
 type groupRecord struct {
 	Group
-	Owner   string
-	Invited map[string]bool
+	Owner     string
+	Invited   map[string]bool
+	InvitedAt map[string]time.Time
 }
 type state struct {
 	Next           uint64
@@ -108,6 +193,8 @@ type state struct {
 	Followers      map[string]map[string]bool
 	Reactions      map[string]map[string]int
 	Read           map[string]map[string]bool
+	DMByClientID   map[string]*Message
+	Activities     []ActivityEvent
 }
 
 func newState() *state {
@@ -117,6 +204,7 @@ func newState() *state {
 		Comments: map[string]*CommentNode{}, CommentPosts: map[string]string{},
 		CommentsByPost: map[string][]string{}, Followers: map[string]map[string]bool{},
 		Reactions: map[string]map[string]int{}, Read: map[string]map[string]bool{},
+		DMByClientID: map[string]*Message{}, Activities: []ActivityEvent{},
 	}
 }
 
@@ -267,6 +355,9 @@ func (db *store) apply(typ string, raw []byte) error {
 		return err
 	}
 	str := func(k string) string { var v string; _ = json.Unmarshal(fields[k], &v); return v }
+	if seq := uintField(fields, "sequence"); seq > 0 {
+		db.s.Next = max(db.s.Next, seq)
+	}
 	switch typ {
 	case "identity":
 		var x identityRecord
@@ -277,6 +368,9 @@ func (db *store) apply(typ string, raw []byte) error {
 			x.Contacts = map[string]bool{}
 		}
 		x.LastSeen = time.Time{}
+		if x.LastActive.IsZero() {
+			x.LastActive = x.LastSeen
+		}
 		db.s.Identities[x.ID] = &x
 	case "profile":
 		var p Profile
@@ -293,11 +387,18 @@ func (db *store) apply(typ string, raw []byte) error {
 		if x := db.s.Identities[to]; x != nil {
 			x.Contacts[from] = true
 		}
+		var connectedAt time.Time
+		_ = json.Unmarshal(fields["created_at"], &connectedAt)
+		db.recordActivity(ActivityEvent{Type: "connect", ID: to, ActorID: from, TargetID: to, Sequence: uintField(fields, "sequence"), CreatedAt: connectedAt, Summary: "connected participant"})
 	case "dm":
 		var m Message
 		_ = json.Unmarshal(raw, &m)
 		db.s.DMs = append(db.s.DMs, &m)
+		if m.ClientMessageID != "" {
+			db.s.DMByClientID[m.SenderID+"\x00"+m.ClientMessageID] = &m
+		}
 		db.s.Next = max(db.s.Next, m.Sequence)
+		db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: &m})
 	case "read":
 		id := str("id")
 		var ids []string
@@ -319,10 +420,21 @@ func (db *store) apply(typ string, raw []byte) error {
 		if g.Invited == nil {
 			g.Invited = map[string]bool{}
 		}
+		if g.InvitedAt == nil {
+			g.InvitedAt = map[string]time.Time{}
+		}
 		db.s.Groups[g.ID] = &g
 	case "invite":
 		if g := db.s.Groups[str("group")]; g != nil {
-			g.Invited[str("user")] = true
+			user := str("user")
+			g.Invited[user] = true
+			var at time.Time
+			_ = json.Unmarshal(fields["created_at"], &at)
+			if at.IsZero() {
+				at = time.Now().UTC()
+			}
+			g.InvitedAt[user] = at
+			db.recordActivity(ActivityEvent{Type: "invite", ID: g.ID, ActorID: str("invited_by"), TargetID: user, Sequence: uintField(fields, "sequence"), CreatedAt: at, Summary: "group invitation"})
 		}
 	case "join":
 		if g := db.s.Groups[str("group")]; g != nil {
@@ -331,41 +443,66 @@ func (db *store) apply(typ string, raw []byte) error {
 				g.Members = append(g.Members, user)
 			}
 			delete(g.Invited, user)
+			delete(g.InvitedAt, user)
+			var joinedAt time.Time
+			_ = json.Unmarshal(fields["created_at"], &joinedAt)
+			db.recordActivity(ActivityEvent{Type: "join", ID: g.ID, ActorID: user, TargetID: g.ID, Sequence: uintField(fields, "sequence"), CreatedAt: joinedAt, Summary: "joined group"})
 		}
 	case "leave":
 		if g := db.s.Groups[str("group")]; g != nil {
-			g.Members = remove(g.Members, str("user"))
+			user := str("user")
+			g.Members = remove(g.Members, user)
+			var leftAt time.Time
+			_ = json.Unmarshal(fields["created_at"], &leftAt)
+			db.recordActivity(ActivityEvent{Type: "leave", ID: g.ID, ActorID: user, TargetID: g.ID, Sequence: uintField(fields, "sequence"), CreatedAt: leftAt, Summary: "left group"})
 		}
 	case "group_message":
 		var m Message
 		_ = json.Unmarshal(raw, &m)
 		db.s.GroupMessages[m.GroupID] = append(db.s.GroupMessages[m.GroupID], &m)
 		db.s.Next = max(db.s.Next, m.Sequence)
+		db.recordActivity(ActivityEvent{Type: "group_message", ID: m.ID, ActorID: m.SenderID, TargetID: m.GroupID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "group message", Message: &m})
 	case "post":
 		var p Post
 		_ = json.Unmarshal(raw, &p)
 		db.s.Posts[p.ID] = &p
+		db.s.Next = max(db.s.Next, sequenceFromID(p.ID))
+		db.recordActivity(ActivityEvent{Type: "post", ID: p.ID, ActorID: p.AuthorID, Sequence: sequenceFromID(p.ID), CreatedAt: p.CreatedAt, Summary: p.Title})
 	case "comment":
 		var c CommentNode
 		_ = json.Unmarshal(raw, &c)
 		post := str("post")
 		db.s.Comments[c.ID] = &c
+		db.s.Next = max(db.s.Next, sequenceFromID(c.ID))
 		db.s.CommentPosts[c.ID] = post
 		db.s.CommentsByPost[post] = append(db.s.CommentsByPost[post], c.ID)
+		db.recordActivity(ActivityEvent{Type: "comment", ID: c.ID, ActorID: c.AuthorID, TargetID: post, Sequence: sequenceFromID(c.ID), CreatedAt: c.CreatedAt, Summary: "thread comment"})
 	case "follow":
 		post, user := str("post"), str("user")
 		if db.s.Followers[post] == nil {
 			db.s.Followers[post] = map[string]bool{}
 		}
 		db.s.Followers[post][user] = true
+		db.recordActivity(ActivityEvent{Type: "follow", ID: post, ActorID: user, TargetID: post, Sequence: uintField(fields, "sequence"), CreatedAt: db.s.LastTime, Summary: "followed thread"})
 	case "unfollow":
-		delete(db.s.Followers[str("post")], str("user"))
+		post, user := str("post"), str("user")
+		delete(db.s.Followers[post], user)
+		db.recordActivity(ActivityEvent{Type: "unfollow", ID: post, ActorID: user, TargetID: post, Sequence: uintField(fields, "sequence"), CreatedAt: db.s.LastTime, Summary: "unfollowed thread"})
 	case "react":
 		target, reaction := str("target"), str("reaction")
 		if db.s.Reactions[target] == nil {
 			db.s.Reactions[target] = map[string]int{}
 		}
 		db.s.Reactions[target][reaction]++
+		db.recordActivity(ActivityEvent{Type: "reaction", ID: target, ActorID: str("user"), TargetID: target, Sequence: uintField(fields, "sequence"), CreatedAt: db.s.LastTime, Summary: "reaction"})
+	case "presence":
+		id := str("id")
+		var at time.Time
+		_ = json.Unmarshal(fields["last_active"], &at)
+		if x := db.s.Identities[id]; x != nil {
+			x.LastActive = at
+			x.LastSeen = time.Time{}
+		}
 	}
 	return nil
 }
@@ -400,6 +537,7 @@ func (db *store) nextID(prefix string) string {
 	db.s.Next++
 	return fmt.Sprintf("%s-%016x", prefix, db.s.Next)
 }
+func (db *store) nextActivitySequence() uint64 { db.s.Next++; return db.s.Next }
 func (db *store) now() time.Time {
 	n := time.Now().UTC()
 	if !n.After(db.s.LastTime) {
@@ -410,8 +548,30 @@ func (db *store) now() time.Time {
 }
 func (db *store) touch(id string) {
 	if x := db.s.Identities[id]; x != nil {
-		x.LastSeen = time.Now().UTC()
+		now := time.Now().UTC()
+		x.LastSeen = now
+		x.LastActive = now
 	}
+}
+func sequenceFromID(id string) uint64 {
+	parts := strings.Split(id, "-")
+	if len(parts) == 0 {
+		return 0
+	}
+	v, err := strconv.ParseUint(parts[len(parts)-1], 16, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+func (db *store) recordActivity(event ActivityEvent) {
+	if event.Sequence == 0 {
+		event.Sequence = sequenceFromID(event.ID)
+	}
+	if event.Sequence == 0 {
+		event.Sequence = db.s.Next
+	}
+	db.s.Activities = append(db.s.Activities, event)
 }
 
 type server struct {
@@ -434,6 +594,14 @@ func (s *server) auth(r *http.Request) (string, error) {
 	}
 	return "", errors.New("invalid session token")
 }
+func (s *server) tokenFor(id string) string {
+	s.db.mu.RLock()
+	defer s.db.mu.RUnlock()
+	if x := s.db.s.Identities[id]; x != nil {
+		return x.Token
+	}
+	return ""
+}
 func (s *server) online(id string) bool {
 	x := s.db.s.Identities[id]
 	return x != nil && !x.LastSeen.IsZero() && time.Since(x.LastSeen) < s.idle
@@ -455,6 +623,342 @@ func parseStrings(raw json.RawMessage, key string) []string {
 	var v []string
 	_ = json.Unmarshal(m[key], &v)
 	return v
+}
+func parseParams(raw json.RawMessage, out any) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return bad("invalid parameters")
+	}
+	return nil
+}
+
+const secureWirePrefix = "ht1:"
+
+func secureWireBlock(token string) (cipher.AEAD, error) {
+	key := sha256.Sum256(append([]byte("HarnessTalkie RPC v1\x00"), []byte(token)...))
+	b, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(b)
+}
+
+func secureWireKey(key string) bool {
+	switch key {
+	case "content", "title", "summary", "bio", "description", "current_work", "limitations":
+		return true
+	default:
+		return false
+	}
+}
+
+func secureWireString(value, token string, encrypt bool) (string, error) {
+	aead, err := secureWireBlock(token)
+	if err != nil {
+		return "", err
+	}
+	if encrypt {
+		if strings.HasPrefix(value, secureWirePrefix) {
+			return value, nil
+		}
+		nonce := make([]byte, aead.NonceSize())
+		if _, err = rand.Read(nonce); err != nil {
+			return "", err
+		}
+		sealed := aead.Seal(nonce, nonce, []byte(value), nil)
+		return secureWirePrefix + base64.RawURLEncoding.EncodeToString(sealed), nil
+	}
+	if !strings.HasPrefix(value, secureWirePrefix) {
+		return value, nil
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, secureWirePrefix))
+	if err != nil || len(sealed) < aead.NonceSize() {
+		if err == nil {
+			err = errors.New("invalid secure content")
+		}
+		return "", err
+	}
+	plain, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func secureWireValue(value any, token string, encrypt bool) error {
+	switch x := value.(type) {
+	case map[string]any:
+		for key, child := range x {
+			if secureWireKey(key) {
+				if text, ok := child.(string); ok {
+					protected, err := secureWireString(text, token, encrypt)
+					if err != nil {
+						return err
+					}
+					x[key] = protected
+					continue
+				}
+			}
+			if err := secureWireValue(child, token, encrypt); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if err := secureWireValue(child, token, encrypt); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func secureWireJSON(raw any, token string, encrypt bool) (json.RawMessage, error) {
+	if token == "" || raw == nil {
+		return mustJSON(raw), nil
+	}
+	var value any
+	var err error
+	if b, ok := raw.(json.RawMessage); ok {
+		err = json.Unmarshal(b, &value)
+	} else {
+		b, marshalErr := json.Marshal(raw)
+		err = marshalErr
+		if err == nil {
+			err = json.Unmarshal(b, &value)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err = secureWireValue(value, token, encrypt); err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
+}
+func uintField(fields map[string]json.RawMessage, key string) uint64 {
+	var v uint64
+	_ = json.Unmarshal(fields[key], &v)
+	return v
+}
+func stringSliceCopy(v []string) []string { return append([]string(nil), v...) }
+func participantFrom(x *identityRecord, online bool) Participant {
+	displayName := x.Profile.DisplayName
+	if displayName == "" {
+		displayName = x.DisplayName
+	}
+	lastSeen := x.LastActive
+	if lastSeen.IsZero() {
+		lastSeen = x.LastSeen
+	}
+	return Participant{IdentityID: x.ID, Handle: x.Name, DisplayName: displayName, Bio: x.Profile.Bio, Repository: x.Profile.Repository, Harness: x.Profile.Harness, Capabilities: stringSliceCopy(x.Profile.Capabilities), CurrentWork: x.Profile.CurrentWork, Limitations: x.Profile.Limitations, CollaborationTopics: stringSliceCopy(x.Profile.CollaborationTopics), Online: online, LastSeen: lastSeen}
+}
+func profileTextMatches(x *identityRecord, q ParticipantQuery) bool {
+	needle := strings.ToLower(q.Query)
+	if needle != "" {
+		matched := false
+		for _, v := range []string{x.ID, x.Name, x.DisplayName, x.Profile.Bio, x.Profile.Repository, x.Profile.Harness, x.Profile.CurrentWork, x.Profile.Limitations} {
+			if strings.Contains(strings.ToLower(v), needle) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			for _, v := range append(append([]string{}, x.Profile.Capabilities...), x.Profile.CollaborationTopics...) {
+				if strings.Contains(strings.ToLower(v), needle) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if q.Repository != "" && !strings.EqualFold(q.Repository, x.Profile.Repository) {
+		return false
+	}
+	if q.Harness != "" && !strings.EqualFold(q.Harness, x.Profile.Harness) {
+		return false
+	}
+	if q.CurrentWork != "" && !strings.Contains(strings.ToLower(x.Profile.CurrentWork), strings.ToLower(q.CurrentWork)) {
+		return false
+	}
+	if q.Capability != "" {
+		found := false
+		for _, v := range x.Profile.Capabilities {
+			if strings.EqualFold(v, q.Capability) || strings.Contains(strings.ToLower(v), strings.ToLower(q.Capability)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+func (s *server) participantsLocked(q ParticipantQuery) []Participant {
+	out := []Participant{}
+	for _, x := range s.db.s.Identities {
+		if profileTextMatches(x, q) {
+			out = append(out, participantFrom(x, s.online(x.ID)))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].IdentityID < out[j].IdentityID })
+	return out
+}
+func (s *server) invitesLocked(caller string) []Invitation {
+	out := []Invitation{}
+	for _, g := range s.db.s.Groups {
+		if g.Invited[caller] {
+			at := g.InvitedAt[caller]
+			out = append(out, Invitation{Group: g.Group, InvitedBy: g.Owner, CreatedAt: at})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
+}
+func (s *server) bootstrapLocked(caller string, includeProfiles, includeInvites, includePosts bool) Bootstrap {
+	x := s.db.s.Identities[caller]
+	b := Bootstrap{Identity: Identity{ID: x.ID, DisplayName: x.DisplayName}, UnreadDMs: 0, Cursor: s.db.s.Next}
+	for _, m := range s.db.s.DMs {
+		if m.RecipientID == caller && !m.Read {
+			b.UnreadDMs++
+		}
+	}
+	for _, g := range s.db.s.Groups {
+		if contains(g.Members, caller) {
+			b.Groups = append(b.Groups, g.Group)
+		}
+	}
+	sort.Slice(b.Groups, func(i, j int) bool { return b.Groups[i].ID < b.Groups[j].ID })
+	if includeProfiles {
+		b.Participants = s.participantsLocked(ParticipantQuery{})
+	}
+	if includeInvites {
+		b.Invites = s.invitesLocked(caller)
+	}
+	if includePosts {
+		for _, p := range s.db.s.Posts {
+			b.RecentPosts = append(b.RecentPosts, *p)
+		}
+		sort.Slice(b.RecentPosts, func(i, j int) bool { return b.RecentPosts[i].CreatedAt.Before(b.RecentPosts[j].CreatedAt) })
+		if len(b.RecentPosts) > 20 {
+			b.RecentPosts = b.RecentPosts[len(b.RecentPosts)-20:]
+		}
+	}
+	return b
+}
+func (s *server) resolveParticipantLocked(query string) *identityRecord {
+	if x := s.db.s.Identities[query]; x != nil {
+		return x
+	}
+	for _, x := range s.db.s.Identities {
+		if x.Name == query || x.DisplayName == query {
+			return x
+		}
+	}
+	return nil
+}
+func (s *server) eventVisibleLocked(caller string, e ActivityEvent) bool {
+	if e.Type == "dm" && e.Message != nil {
+		return e.Message.SenderID == caller || e.Message.RecipientID == caller
+	}
+	if e.Type == "invite" {
+		return e.TargetID == caller || e.ActorID == caller
+	}
+	if e.Type == "group_message" {
+		g := s.db.s.Groups[e.TargetID]
+		return g != nil && contains(g.Members, caller)
+	}
+	return true
+}
+func (s *server) eventsLocked(caller string, after uint64, limit int) ([]ActivityEvent, bool) {
+	all := make([]ActivityEvent, 0, limit+1)
+	for _, e := range s.db.s.Activities {
+		if e.Sequence > after && s.eventVisibleLocked(caller, e) {
+			all = append(all, e)
+			if len(all) > limit {
+				return all[:limit], true
+			}
+		}
+	}
+	return all, false
+}
+func (s *server) waitForEvents(ctx context.Context, caller string, raw json.RawMessage) (EventBatch, error) {
+	var q EventQuery
+	if err := parseParams(raw, &q); err != nil {
+		return EventBatch{}, err
+	}
+	if q.Limit <= 0 || q.Limit > 100 {
+		q.Limit = 50
+	}
+	if q.WaitMS < 0 {
+		q.WaitMS = 0
+	}
+	if q.WaitMS > 30000 {
+		q.WaitMS = 30000
+	}
+	deadline := time.NewTimer(time.Duration(q.WaitMS) * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		s.db.mu.Lock()
+		s.db.touch(caller)
+		events, more := s.eventsLocked(caller, q.AfterSequence, q.Limit)
+		next := q.AfterSequence
+		if len(events) > 0 {
+			next = events[len(events)-1].Sequence
+		}
+		if len(events) > 0 {
+			if q.Ack {
+				ids := []string{}
+				for _, e := range events {
+					if e.Message != nil && e.Message.RecipientID == caller && !e.Message.Read {
+						ids = append(ids, e.Message.ID)
+					}
+				}
+				if len(ids) > 0 {
+					if err := s.markReadLocked(caller, ids); err != nil {
+						s.db.mu.Unlock()
+						return EventBatch{}, err
+					}
+				}
+			}
+			s.db.mu.Unlock()
+			return EventBatch{Events: events, NextCursor: next, More: more}, nil
+		}
+		s.db.mu.Unlock()
+		if q.WaitMS == 0 {
+			return EventBatch{Events: []ActivityEvent{}, NextCursor: q.AfterSequence}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return EventBatch{}, ctx.Err()
+		case <-deadline.C:
+			return EventBatch{Events: []ActivityEvent{}, NextCursor: q.AfterSequence}, nil
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+func (s *server) markReadLocked(caller string, ids []string) error {
+	if err := s.db.appendEvent("read", map[string]any{"id": caller, "messages": ids}); err != nil {
+		return err
+	}
+	if s.db.s.Read[caller] == nil {
+		s.db.s.Read[caller] = map[string]bool{}
+	}
+	for _, id := range ids {
+		s.db.s.Read[caller][id] = true
+		for _, m := range s.db.s.DMs {
+			if m.ID == id && m.RecipientID == caller {
+				m.Read = true
+			}
+		}
+	}
+	return nil
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -500,12 +1004,37 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	result, err := s.dispatch(context.Background(), caller, req.Method, req.Params)
+	secureWire := caller != "" && r.Header.Get("X-HarnessTalkie-Secure") == "aesgcm-v1"
+	token := s.tokenFor(caller)
+	if secureWire {
+		params, err := secureWireJSON(req.Params, token, false)
+		if err != nil {
+			_, _ = w.Write(s.errorResult(req.ID, -32602, err.Error()))
+			return
+		}
+		req.Params = params
+	}
+	var result any
+	var err error
+	if req.Method == "WaitForEvents" {
+		result, err = s.waitForEvents(r.Context(), caller, req.Params)
+	} else {
+		result, err = s.dispatch(r.Context(), caller, req.Method, req.Params)
+	}
 	if err != nil {
 		_, _ = w.Write(s.errorResult(req.ID, codeFor(err), err.Error()))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if secureWire {
+		secured, secureErr := secureWireJSON(result, token, true)
+		if secureErr != nil {
+			_, _ = w.Write(s.errorResult(req.ID, -32000, secureErr.Error()))
+			return
+		}
+		_, _ = w.Write(mustJSON(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": secured}))
+		return
+	}
 	_, _ = w.Write(mustJSON(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}))
 }
 
@@ -550,7 +1079,10 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 	arg := func(k string) string { return parseArg(raw, k) }
 	switch method {
 	case "PublishProfile":
-		p := Profile{DisplayName: arg("display_name"), Bio: arg("bio")}
+		var p Profile
+		if err := parseParams(raw, &p); err != nil {
+			return nil, err
+		}
 		if p.DisplayName == "" {
 			p.DisplayName = s.db.s.Identities[caller].DisplayName
 		}
@@ -564,12 +1096,20 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if x == nil {
 			return nil, missing("identity not found")
 		}
-		return Presence{IdentityID: id, Online: s.online(id) || id == caller, UpdatedAt: x.LastSeen}, nil
+		lastActive := x.LastActive
+		if lastActive.IsZero() {
+			lastActive = x.LastSeen
+		}
+		return Presence{IdentityID: id, Online: s.online(id) || id == caller, UpdatedAt: lastActive}, nil
 	case "ListOnline":
 		out := []Presence{}
 		for id, x := range s.db.s.Identities {
 			if s.online(id) || id == caller {
-				out = append(out, Presence{IdentityID: id, Online: true, UpdatedAt: x.LastSeen})
+				lastActive := x.LastActive
+				if lastActive.IsZero() {
+					lastActive = x.LastSeen
+				}
+				out = append(out, Presence{IdentityID: id, Online: true, UpdatedAt: lastActive})
 			}
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].IdentityID < out[j].IdentityID })
@@ -579,7 +1119,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Identities[to] == nil {
 			return nil, missing("identity not found")
 		}
-		if err := s.db.commit("connect", map[string]string{"from": caller, "to": to}, func() { s.db.s.Identities[caller].Contacts[to] = true; s.db.s.Identities[to].Contacts[caller] = true }); err != nil {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("connect", map[string]any{"from": caller, "to": to, "sequence": seq, "created_at": at}, func() {
+			s.db.s.Identities[caller].Contacts[to] = true
+			s.db.s.Identities[to].Contacts[caller] = true
+			s.db.recordActivity(ActivityEvent{Type: "connect", ID: to, ActorID: caller, TargetID: to, Sequence: seq, CreatedAt: at, Summary: "connected participant"})
+		}); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -592,13 +1137,100 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].IdentityID < out[j].IdentityID })
 		return out, nil
+	case "ListParticipants", "FindPeers":
+		var q ParticipantQuery
+		if err := parseParams(raw, &q); err != nil {
+			return nil, err
+		}
+		return s.participantsLocked(q), nil
+	case "ListInvites":
+		return s.invitesLocked(caller), nil
+	case "ListGroups":
+		out := []Group{}
+		for _, g := range s.db.s.Groups {
+			if contains(g.Members, caller) {
+				out = append(out, g.Group)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		return out, nil
+	case "ListPublicPosts", "ListPosts":
+		out := []Post{}
+		for _, p := range s.db.s.Posts {
+			out = append(out, *p)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+		return out, nil
+	case "GetCapabilities":
+		return []string{"Bootstrap", "ListParticipants", "FindPeers", "ListInvites", "ListGroups", "ListPublicPosts", "Heartbeat", "Disconnect", "ConnectAndBootstrap", "WaitForEvents", "SendDM", "GetDMHistoryPage", "ReceiveDMsPage"}, nil
+	case "Heartbeat":
+		at := time.Now().UTC()
+		if err := s.db.commit("presence", map[string]any{"id": caller, "last_active": at}, func() {
+			x := s.db.s.Identities[caller]
+			x.LastActive, x.LastSeen = at, at
+		}); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	case "Disconnect":
+		if x := s.db.s.Identities[caller]; x != nil {
+			x.LastSeen = time.Time{}
+		}
+		return nil, nil
+	case "Bootstrap":
+		var p struct {
+			IncludeProfiles    bool `json:"include_profiles"`
+			IncludeInvites     bool `json:"include_invites"`
+			IncludeRecentPosts bool `json:"include_recent_posts"`
+		}
+		if err := parseParams(raw, &p); err != nil {
+			return nil, err
+		}
+		return s.bootstrapLocked(caller, p.IncludeProfiles, p.IncludeInvites, p.IncludeRecentPosts), nil
+	case "ConnectAndBootstrap":
+		peer := s.resolveParticipantLocked(arg("query"))
+		if peer == nil {
+			return nil, missing("participant not found")
+		}
+		if peer.ID != caller {
+			seq, at := s.db.nextActivitySequence(), s.db.now()
+			if err := s.db.commit("connect", map[string]any{"from": caller, "to": peer.ID, "sequence": seq, "created_at": at}, func() {
+				s.db.s.Identities[caller].Contacts[peer.ID] = true
+				peer.Contacts[caller] = true
+				s.db.recordActivity(ActivityEvent{Type: "connect", ID: peer.ID, ActorID: caller, TargetID: peer.ID, Sequence: seq, CreatedAt: at, Summary: "connected participant"})
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return s.bootstrapLocked(caller, true, true, true), nil
 	case "SendDM":
-		to, content := arg("to"), arg("content")
-		if s.db.s.Identities[to] == nil {
+		var req SendDMRequest
+		if err := parseParams(raw, &req); err != nil {
+			return nil, err
+		}
+		if req.To == "" {
+			req.To = arg("to")
+		}
+		if req.Content == "" {
+			req.Content = arg("content")
+		}
+		if s.db.s.Identities[req.To] == nil {
 			return nil, missing("recipient not found")
 		}
-		m := &Message{ID: s.db.nextID("msg"), SenderID: caller, RecipientID: to, Content: content, Sequence: s.db.s.Next, CreatedAt: s.db.now()}
-		if err := s.db.commit("dm", m, func() { s.db.s.DMs = append(s.db.s.DMs, m) }); err != nil {
+		if req.ClientMessageID != "" {
+			if m := s.db.s.DMByClientID[caller+"\x00"+req.ClientMessageID]; m != nil {
+				return *m, nil
+			}
+		}
+		conversation := conversationID(caller, req.To)
+		m := &Message{ID: s.db.nextID("msg"), SenderID: caller, RecipientID: req.To, Content: req.Content, Sequence: s.db.s.Next, CreatedAt: s.db.now(), ConversationID: conversation, ReplyTo: req.ReplyTo, ClientMessageID: req.ClientMessageID}
+		if err := s.db.commit("dm", m, func() {
+			s.db.s.DMs = append(s.db.s.DMs, m)
+			if m.ClientMessageID != "" {
+				s.db.s.DMByClientID[caller+"\x00"+m.ClientMessageID] = m
+			}
+			s.db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: m})
+		}); err != nil {
 			return nil, err
 		}
 		return *m, nil
@@ -617,6 +1249,24 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			}
 		}
 		return out, nil
+	case "GetDMHistoryPage":
+		var q MessageQuery
+		if err := parseParams(raw, &q); err != nil {
+			return nil, err
+		}
+		if q.With == "" || s.db.s.Identities[q.With] == nil {
+			return nil, missing("participant not found")
+		}
+		if q.With != caller && !s.db.s.Identities[caller].Contacts[q.With] && !hasDM(s.db.s.DMs, caller, q.With) {
+			return nil, denied("DM history is private")
+		}
+		out := []Message{}
+		for _, m := range s.db.s.DMs {
+			if m.Sequence > q.AfterSequence && ((m.SenderID == caller && m.RecipientID == q.With) || (m.SenderID == q.With && m.RecipientID == caller)) {
+				out = append(out, *m)
+			}
+		}
+		return pageMessages(out, q.Limit), nil
 	case "ReceiveDMs":
 		out := []Message{}
 		for _, m := range s.db.s.DMs {
@@ -625,21 +1275,21 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			}
 		}
 		return out, nil
+	case "ReceiveDMsPage":
+		var q MessageQuery
+		if err := parseParams(raw, &q); err != nil {
+			return nil, err
+		}
+		out := []Message{}
+		for _, m := range s.db.s.DMs {
+			if m.RecipientID == caller && !m.Read && m.Sequence > q.AfterSequence {
+				out = append(out, *m)
+			}
+		}
+		return pageMessages(out, q.Limit), nil
 	case "MarkRead":
 		ids := parseStrings(raw, "message_ids")
-		if err := s.db.commit("read", map[string]any{"id": caller, "messages": ids}, func() {
-			if s.db.s.Read[caller] == nil {
-				s.db.s.Read[caller] = map[string]bool{}
-			}
-			for _, id := range ids {
-				s.db.s.Read[caller][id] = true
-				for _, m := range s.db.s.DMs {
-					if m.ID == id && m.RecipientID == caller {
-						m.Read = true
-					}
-				}
-			}
-		}); err != nil {
+		if err := s.markReadLocked(caller, ids); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -648,7 +1298,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if name == "" {
 			return nil, bad("group name is required")
 		}
-		g := &groupRecord{Group: Group{ID: s.db.nextID("group"), Name: name, Members: []string{caller}}, Owner: caller, Invited: map[string]bool{}}
+		g := &groupRecord{Group: Group{ID: s.db.nextID("group"), Name: name, Members: []string{caller}}, Owner: caller, Invited: map[string]bool{}, InvitedAt: map[string]time.Time{}}
 		if err := s.db.commit("group", g, func() { s.db.s.Groups[g.ID] = g }); err != nil {
 			return nil, err
 		}
@@ -665,7 +1315,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Identities[user] == nil {
 			return nil, missing("participant not found")
 		}
-		if err := s.db.commit("invite", map[string]string{"group": gid, "user": user}, func() { g.Invited[user] = true }); err != nil {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("invite", map[string]any{"group": gid, "user": user, "invited_by": caller, "created_at": at, "sequence": seq}, func() {
+			g.Invited[user] = true
+			g.InvitedAt[user] = at
+			s.db.recordActivity(ActivityEvent{Type: "invite", ID: g.ID, ActorID: caller, TargetID: user, Sequence: seq, CreatedAt: at, Summary: "group invitation"})
+		}); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -678,11 +1333,14 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if g.Owner != caller && !g.Invited[caller] && !contains(g.Members, caller) {
 			return nil, denied("invitation required")
 		}
-		if err := s.db.commit("join", map[string]string{"group": gid, "user": caller}, func() {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("join", map[string]any{"group": gid, "user": caller, "sequence": seq, "created_at": at}, func() {
 			if !contains(g.Members, caller) {
 				g.Members = append(g.Members, caller)
 			}
 			delete(g.Invited, caller)
+			delete(g.InvitedAt, caller)
+			s.db.recordActivity(ActivityEvent{Type: "join", ID: g.ID, ActorID: caller, TargetID: g.ID, Sequence: seq, CreatedAt: at, Summary: "joined group"})
 		}); err != nil {
 			return nil, err
 		}
@@ -699,7 +1357,11 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if g.Owner == caller {
 			return nil, denied("owner cannot leave")
 		}
-		if err := s.db.commit("leave", map[string]string{"group": gid, "user": caller}, func() { g.Members = remove(g.Members, caller) }); err != nil {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("leave", map[string]any{"group": gid, "user": caller, "sequence": seq, "created_at": at}, func() {
+			g.Members = remove(g.Members, caller)
+			s.db.recordActivity(ActivityEvent{Type: "leave", ID: g.ID, ActorID: caller, TargetID: g.ID, Sequence: seq, CreatedAt: at, Summary: "left group"})
+		}); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -713,7 +1375,10 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			return nil, denied("group membership required")
 		}
 		m := &Message{ID: s.db.nextID("msg"), SenderID: caller, GroupID: gid, Content: content, Sequence: s.db.s.Next, CreatedAt: s.db.now()}
-		if err := s.db.commit("group_message", m, func() { s.db.s.GroupMessages[gid] = append(s.db.s.GroupMessages[gid], m) }); err != nil {
+		if err := s.db.commit("group_message", m, func() {
+			s.db.s.GroupMessages[gid] = append(s.db.s.GroupMessages[gid], m)
+			s.db.recordActivity(ActivityEvent{Type: "group_message", ID: m.ID, ActorID: m.SenderID, TargetID: m.GroupID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "group message", Message: m})
+		}); err != nil {
 			return nil, err
 		}
 		return *m, nil
@@ -737,7 +1402,10 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			return nil, bad("post title is required")
 		}
 		p := &Post{ID: s.db.nextID("post"), AuthorID: caller, Title: title, Content: content, CreatedAt: s.db.now()}
-		if err := s.db.commit("post", p, func() { s.db.s.Posts[p.ID] = p }); err != nil {
+		if err := s.db.commit("post", p, func() {
+			s.db.s.Posts[p.ID] = p
+			s.db.recordActivity(ActivityEvent{Type: "post", ID: p.ID, ActorID: p.AuthorID, Sequence: sequenceFromID(p.ID), CreatedAt: p.CreatedAt, Summary: p.Title})
+		}); err != nil {
 			return nil, err
 		}
 		return *p, nil
@@ -760,6 +1428,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			s.db.s.Comments[c.ID] = c
 			s.db.s.CommentPosts[c.ID] = postID
 			s.db.s.CommentsByPost[postID] = append(s.db.s.CommentsByPost[postID], c.ID)
+			s.db.recordActivity(ActivityEvent{Type: "comment", ID: c.ID, ActorID: c.AuthorID, TargetID: postID, Sequence: sequenceFromID(c.ID), CreatedAt: c.CreatedAt, Summary: "thread comment"})
 		}); err != nil {
 			return nil, err
 		}
@@ -775,11 +1444,13 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Posts[post] == nil {
 			return nil, missing("post not found")
 		}
-		if err := s.db.commit("follow", map[string]string{"post": post, "user": caller}, func() {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("follow", map[string]any{"post": post, "user": caller, "sequence": seq, "created_at": at}, func() {
 			if s.db.s.Followers[post] == nil {
 				s.db.s.Followers[post] = map[string]bool{}
 			}
 			s.db.s.Followers[post][caller] = true
+			s.db.recordActivity(ActivityEvent{Type: "follow", ID: post, ActorID: caller, TargetID: post, Sequence: seq, CreatedAt: at, Summary: "followed thread"})
 		}); err != nil {
 			return nil, err
 		}
@@ -789,7 +1460,11 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Posts[post] == nil {
 			return nil, missing("post not found")
 		}
-		if err := s.db.commit("unfollow", map[string]string{"post": post, "user": caller}, func() { delete(s.db.s.Followers[post], caller) }); err != nil {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("unfollow", map[string]any{"post": post, "user": caller, "sequence": seq, "created_at": at}, func() {
+			delete(s.db.s.Followers[post], caller)
+			s.db.recordActivity(ActivityEvent{Type: "unfollow", ID: post, ActorID: caller, TargetID: post, Sequence: seq, CreatedAt: at, Summary: "unfollowed thread"})
+		}); err != nil {
 			return nil, err
 		}
 		return nil, nil
@@ -798,11 +1473,13 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Posts[target] == nil && s.db.s.Comments[target] == nil {
 			return nil, missing("reaction target not found")
 		}
-		if err := s.db.commit("react", map[string]string{"target": target, "reaction": reaction, "user": caller}, func() {
+		seq, at := s.db.nextActivitySequence(), s.db.now()
+		if err := s.db.commit("react", map[string]any{"target": target, "reaction": reaction, "user": caller, "sequence": seq, "created_at": at}, func() {
 			if s.db.s.Reactions[target] == nil {
 				s.db.s.Reactions[target] = map[string]int{}
 			}
 			s.db.s.Reactions[target][reaction]++
+			s.db.recordActivity(ActivityEvent{Type: "reaction", ID: target, ActorID: caller, TargetID: target, Sequence: seq, CreatedAt: at, Summary: "reaction"})
 		}); err != nil {
 			return nil, err
 		}
@@ -815,22 +1492,6 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			}
 		}
 		return ResumeResult{RestoredMessages: n, RestoredThreads: len(s.db.s.Followers)}, nil
-	case "ListGroups":
-		out := []Group{}
-		for _, g := range s.db.s.Groups {
-			if contains(g.Members, caller) {
-				out = append(out, g.Group)
-			}
-		}
-		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-		return out, nil
-	case "ListPosts":
-		out := []Post{}
-		for _, p := range s.db.s.Posts {
-			out = append(out, *p)
-		}
-		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-		return out, nil
 	case "Search":
 		q := strings.ToLower(arg("query"))
 		out := []any{}
@@ -857,6 +1518,26 @@ func hasDM(ms []*Message, a, b string) bool {
 		}
 	}
 	return false
+}
+func conversationID(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return "dm:" + a + ":" + b
+}
+func pageMessages(messages []Message, limit int) MessagePage {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	more := len(messages) > limit
+	if more {
+		messages = messages[:limit]
+	}
+	next := uint64(0)
+	if len(messages) > 0 {
+		next = messages[len(messages)-1].Sequence
+	}
+	return MessagePage{Messages: messages, NextCursor: next, More: more}
 }
 func (s *server) threadLocked(id string) Thread {
 	p := *s.db.s.Posts[id]
@@ -899,7 +1580,7 @@ func sortComments(ns []*CommentNode) {
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	data := flag.String("data", "./data/harnesstalkie.events", "encrypted event-log path")
-	idle := flag.Duration("presence-idle", 750*time.Millisecond, "presence inactivity window")
+	idle := flag.Duration("presence-idle", 45*time.Second, "presence inactivity window; use Heartbeat to renew")
 	flag.Parse()
 	db, err := newStore(*data)
 	if err != nil {

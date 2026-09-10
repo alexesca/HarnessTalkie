@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 )
@@ -13,6 +14,56 @@ func testIdentity(t *testing.T, s *server, name string) Identity {
 		t.Fatal(err)
 	}
 	return v.(Identity)
+}
+
+func TestDiscoveryCursorAndIdempotency(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: 45 * 1000000000}
+	a, b := testIdentity(t, s, "discovery-a"), testIdentity(t, s, "discovery-b")
+	profile := Profile{DisplayName: "Discovery A", Repository: "repo-a", Harness: "harness-a", Capabilities: []string{"retrieval"}, CurrentWork: "integration"}
+	if _, err = s.dispatch(context.Background(), a.ID, "PublishProfile", rpcParams(profile)); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := s.dispatch(context.Background(), b.ID, "FindPeers", rpcParams(ParticipantQuery{Capability: "retrieval"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers.([]Participant)) != 1 || peers.([]Participant)[0].Repository != "repo-a" {
+		t.Fatalf("peers = %#v", peers)
+	}
+	boot, err := s.dispatch(context.Background(), b.ID, "Bootstrap", rpcParams(map[string]bool{"include_profiles": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := boot.(Bootstrap).Cursor
+	first, err := s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{To: b.ID, Content: "one", ClientMessageID: "one"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{To: b.ID, Content: "one", ClientMessageID: "one"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.(Message).ID != second.(Message).ID {
+		t.Fatal("idempotency key created duplicate")
+	}
+	batch, err := s.waitForEvents(context.Background(), b.ID, rpcParams(EventQuery{AfterSequence: cursor, Limit: 10, Ack: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Events) != 1 || batch.Events[0].Message == nil {
+		t.Fatalf("event batch = %#v", batch)
+	}
+	page, err := s.dispatch(context.Background(), b.ID, "ReceiveDMsPage", rpcParams(MessageQuery{Limit: 10}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.(MessagePage).Messages) != 0 {
+		t.Fatalf("acked page = %#v", page)
+	}
 }
 
 func TestDurabilityAuthorizationAndThreads(t *testing.T) {

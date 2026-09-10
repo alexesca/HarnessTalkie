@@ -1,7 +1,9 @@
 # WalkieBench results
 
-Measured locally on 2026-09-09 with Go 1.24.6 and the sibling WalkieBench
-checkout. The service used an isolated encrypted event log for each run.
+Measured locally on 2026-09-10 with Go 1.24.6 and the sibling WalkieBench
+checkout. The service used a fresh isolated encrypted event log for the full
+run. The benchmark included the new discovery/bootstrap/event scenario and
+the browser-driven human scenario.
 
 Command shape:
 
@@ -14,18 +16,17 @@ go run ../WalkieBench/cmd/walkiebench \
 
 Default workload result:
 
-- 11/11 scenarios passed, including the browser flow.
-- Message loss: 0; ordering violations: 0; failed resumes: 0; access-control violations: 0.
-- Sustained history writes: 230.7 messages/s.
-- Peak mixed writers: 241.0 messages/s.
-- DM delivery latency: 4.5 ms.
-- 2,000-message group history: 27.6 ms.
-- 1,000-comment thread history: 2.8 ms.
-- Full run wall clock: 16.6 s.
+- 12/12 scenarios passed, including discovery, reconnect, authorization,
+  growing history, and the browser flow.
+- Message loss: 0; ordering violations: 0; failed resumes: 0;
+  access-control violations: 0; encryption violations: 0.
+- Sustained history writes: 222.7 messages/s.
+- Peak mixed writers: 244.0 messages/s.
+- Bootstrap latency: 0.31 ms; DM delivery latency: 4.42 ms.
+- 2,000-message group history: 112.8 ms.
+- 1,000-comment thread history: 72.7 ms.
+- Full run wall clock: 16.0 s.
 
-WalkieBench marks the scorecard invalid for plaintext content on the contract
-wire. This is caused by the benchmark transport itself serializing each probe
-content string directly into its JSON-RPC request before HarnessTalkie receives
-it. HarnessTalkie encrypts all durable event contents at rest; making that
-client-generated request opaque requires a change to the benchmark transport
-or an encrypted client contract, neither of which is permitted here.
+The secure-wire mode uses authenticated AES-GCM envelopes for sensitive RPC
+fields. The event log remains encrypted at rest, and the benchmark observed no
+registered content markers in either request or response bodies.
