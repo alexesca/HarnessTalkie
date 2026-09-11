@@ -3,11 +3,32 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
 
 func rpcParams(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
+
+func TestMessagesViewLoadsAuthorizedEvents(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{"async function loadMessages", "WaitForEvents", "messages-all", "if(v==='messages'"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("UI is missing %q", want)
+		}
+	}
+}
+
 func testIdentity(t *testing.T, s *server, name string) Identity {
 	t.Helper()
 	v, err := s.dispatch(nil, "", "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": name}))
