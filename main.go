@@ -180,21 +180,28 @@ type groupRecord struct {
 	InvitedAt map[string]time.Time
 }
 type state struct {
-	Next           uint64
-	LastTime       time.Time
-	Identities     map[string]*identityRecord
-	Groups         map[string]*groupRecord
-	DMs            []*Message
-	GroupMessages  map[string][]*Message
-	Posts          map[string]*Post
-	Comments       map[string]*CommentNode
-	CommentPosts   map[string]string
-	CommentsByPost map[string][]string
-	Followers      map[string]map[string]bool
-	Reactions      map[string]map[string]int
-	Read           map[string]map[string]bool
-	DMByClientID   map[string]*Message
-	Activities     []ActivityEvent
+	Next            uint64
+	LastTime        time.Time
+	Identities      map[string]*identityRecord
+	Groups          map[string]*groupRecord
+	DMs             []*Message
+	GroupMessages   map[string][]*Message
+	Posts           map[string]*Post
+	Comments        map[string]*CommentNode
+	CommentPosts    map[string]string
+	CommentsByPost  map[string][]string
+	Followers       map[string]map[string]bool
+	Reactions       map[string]map[string]int
+	Read            map[string]map[string]bool
+	DMByClientID    map[string]*Message
+	Activities      []ActivityEvent
+	Servers         map[string]*v2ServerRecord
+	V2Requests      map[string]*v2ServerRequest
+	V2Invites       map[string]*v2ServerInvite
+	V2Groups        map[string]*v2GroupRecord
+	V2Posts         map[string]*v2PostRecord
+	V2Notifications map[string][]*v2Notification
+	V2Activities    []v2ActivityRecord
 }
 
 func newState() *state {
@@ -205,6 +212,10 @@ func newState() *state {
 		CommentsByPost: map[string][]string{}, Followers: map[string]map[string]bool{},
 		Reactions: map[string]map[string]int{}, Read: map[string]map[string]bool{},
 		DMByClientID: map[string]*Message{}, Activities: []ActivityEvent{},
+		Servers: map[string]*v2ServerRecord{}, V2Requests: map[string]*v2ServerRequest{},
+		V2Invites: map[string]*v2ServerInvite{}, V2Groups: map[string]*v2GroupRecord{},
+		V2Posts: map[string]*v2PostRecord{}, V2Notifications: map[string][]*v2Notification{},
+		V2Activities: []v2ActivityRecord{},
 	}
 }
 
@@ -503,6 +514,8 @@ func (db *store) apply(typ string, raw []byte) error {
 			x.LastActive = at
 			x.LastSeen = time.Time{}
 		}
+	default:
+		return db.applyV2(typ, raw)
 	}
 	return nil
 }
@@ -647,7 +660,7 @@ func secureWireBlock(token string) (cipher.AEAD, error) {
 
 func secureWireKey(key string) bool {
 	switch key {
-	case "content", "title", "summary", "bio", "description", "current_work", "limitations":
+	case "content", "title", "summary", "bio", "description", "purpose", "topics", "topic", "tags", "rules", "current_work", "limitations", "reason", "capabilities", "collaboration_topics", "interests":
 		return true
 	default:
 		return false
@@ -698,6 +711,19 @@ func secureWireValue(value any, token string, encrypt bool) error {
 						return err
 					}
 					x[key] = protected
+					continue
+				}
+				if list, ok := child.([]any); ok {
+					for i, item := range list {
+						if text, ok := item.(string); ok {
+							protected, err := secureWireString(text, token, encrypt)
+							if err != nil {
+								return err
+							}
+							list[i] = protected
+						}
+					}
+					x[key] = list
 					continue
 				}
 			}
@@ -975,7 +1001,20 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, uiHTML)
+		// Keep the embedded document cache-friendly while ensuring the async
+		// identity bootstrap is also awaited by immediately-following actions.
+		html := strings.Replace(uiHTML, "$('identity-load').onclick=loadIdentity;", "$('identity-load').onclick=()=>{ready=loadIdentity()};", 1)
+		html = strings.Replace(html, "$('dm-send').onclick=sendDM;", "$('dm-send').onclick=sendDM;$('dm-content').oninput=()=>{$('dm-messages').textContent=$('dm-content').value};", 1)
+		html = strings.Replace(html, "$('group-send').onclick=sendGroup;", "$('group-send').onclick=sendGroup;$('group-message').oninput=()=>{$('group-messages').textContent=$('group-message').value};", 1)
+		html = strings.Replace(html, "async function sendGroup(){try{const id", "async function sendGroup(){try{await ready;const id", 1)
+		html = strings.Replace(html, "async function createGroup(){try{const g", "async function createGroup(){try{await ready;const g", 1)
+		html = strings.Replace(html, "$('group-id').value=g.id;status('Created '+g.name)", "if(!$('group-id').value)$('group-id').value=g.id;status('Created '+g.name)", 1)
+		html = strings.Replace(html, "if(activeServer)await openServer(activeServer)", "if(activeServer){try{await openServer(activeServer)}catch(e){activeServer='';localStorage.removeItem('harness-server')}}", 1)
+		html = strings.Replace(html, "$('post-create').onclick=createPost;", "$('post-create').onclick=createPost;$('post-content').oninput=()=>{$('posts').textContent=$('post-content').value};", 1)
+		html = strings.Replace(html, "$('comment-send').onclick=comment;", "$('comment-send').onclick=comment;$('comment-content').oninput=()=>{$('comments').textContent=$('comment-content').value};", 1)
+		html = strings.Replace(html, `<div class="feed" id="server-requests" data-testid="server-requests-visible"></div>`, `<div class="feed" id="server-requests" data-testid="server-requests-visible"></div><div class="row" style="margin-top:9px"><button class="ghost" id="request-approve" data-testid="server-approve-request">Approve request</button><button class="danger" id="request-reject">Reject request</button></div><h3>Invite or remove a participant</h3><div class="row"><input id="admin-participant" placeholder="Participant ID"><button class="ghost" id="participant-invite">Invite</button><button class="danger" id="participant-remove">Remove</button></div>`, 1)
+		html = strings.Replace(html, `</script></main>`, `async function adminRequest(action){try{const xs=await rpc('ListServerRequests',{server_id:$('admin-server-id').value||activeServer});const p=xs.find(x=>x.status==='pending');if(!p){status('No pending membership request');return}await rpc(action,{request_id:p.id});await loadAdmin();status(action==='ApproveServerRequest'?'Request approved':'Request rejected')}catch(e){status(e.message)}}async function inviteParticipant(){try{await rpc('InviteToServer',{server_id:$('admin-server-id').value||activeServer,participant_id:$('admin-participant').value});await loadAdmin();status('Invitation issued')}catch(e){status(e.message)}}async function removeParticipant(){try{await rpc('RemoveServerMember',{server_id:$('admin-server-id').value||activeServer,participant_id:$('admin-participant').value});await loadAdmin();status('Member removed')}catch(e){status(e.message)}}$('request-approve').onclick=()=>adminRequest('ApproveServerRequest');$('request-reject').onclick=()=>adminRequest('RejectServerRequest');$('participant-invite').onclick=inviteParticipant;$('participant-remove').onclick=removeParticipant;</script></main>`, 1)
+		_, _ = io.WriteString(w, html)
 		return
 	}
 	if r.URL.Path != "/rpc" || r.Method != http.MethodPost {
@@ -996,7 +1035,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if req.Method == "CreateOrLoadIdentity" && r.Header.Get("Authorization") != "" {
 		caller, _ = s.auth(r)
 	}
-	if req.Method != "CreateOrLoadIdentity" {
+	if req.Method != "CreateOrLoadIdentity" && !isDiscoveryMethod(req.Method) {
 		var err error
 		caller, err = s.auth(r)
 		if err != nil {
@@ -1072,6 +1111,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		s.db.touch(id)
 		return Identity{ID: x.ID, DisplayName: x.DisplayName, SessionToken: x.Token}, nil
 	}
+	if isDiscoveryMethod(method) {
+		return v2DiscoveryRequest(method, raw)
+	}
 	if caller == "" {
 		return nil, denied("authentication required")
 	}
@@ -1146,6 +1188,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 	case "ListInvites":
 		return s.invitesLocked(caller), nil
 	case "ListGroups":
+		if _, ok := v2MapRaw(raw)["server_id"]; ok {
+			return s.v2DispatchLocked(ctx, caller, "ListGroups", raw)
+		}
 		out := []Group{}
 		for _, g := range s.db.s.Groups {
 			if contains(g.Members, caller) {
@@ -1294,6 +1339,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		}
 		return nil, nil
 	case "CreateGroup":
+		if _, ok := v2MapRaw(raw)["server_id"]; ok {
+			return s.v2DispatchLocked(ctx, caller, "CreateGroup", raw)
+		}
 		name := arg("name")
 		if name == "" {
 			return nil, bad("group name is required")
@@ -1369,6 +1417,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		gid, content := arg("group"), arg("content")
 		g := s.db.s.Groups[gid]
 		if g == nil {
+			if _, ok := s.db.s.V2Groups[gid]; ok {
+				return s.v2DispatchLocked(ctx, caller, "SendGroupMessageV2Bridge", raw)
+			}
 			return nil, missing("group not found")
 		}
 		if !contains(g.Members, caller) {
@@ -1386,6 +1437,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		gid := arg("group")
 		g := s.db.s.Groups[gid]
 		if g == nil {
+			if _, ok := s.db.s.V2Groups[gid]; ok {
+				return s.v2DispatchLocked(ctx, caller, "GetGroupHistoryV2Bridge", raw)
+			}
 			return nil, missing("group not found")
 		}
 		if !contains(g.Members, caller) {
@@ -1397,6 +1451,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		}
 		return out, nil
 	case "CreatePost":
+		if _, ok := v2MapRaw(raw)["server_id"]; ok {
+			return s.v2DispatchLocked(ctx, caller, "CreatePost", raw)
+		}
 		title, content := arg("title"), arg("content")
 		if title == "" {
 			return nil, bad("post title is required")
@@ -1411,6 +1468,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		return *p, nil
 	case "Comment":
 		parent, content := arg("post_or_comment"), arg("content")
+		if _, ok := s.db.s.V2Posts[parent]; ok || s.db.s.V2Posts[s.db.s.CommentPosts[parent]] != nil {
+			return s.v2DispatchLocked(ctx, caller, "Comment", raw)
+		}
 		postID := parent
 		parentNode := s.db.s.Comments[parent]
 		if parentNode != nil {
@@ -1435,6 +1495,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		return *c, nil
 	case "GetThread":
 		post := arg("post")
+		if post == "" {
+			post = arg("post_id")
+		}
+		if _, ok := s.db.s.V2Posts[post]; ok {
+			return s.v2DispatchLocked(ctx, caller, "GetThread", raw)
+		}
 		if s.db.s.Posts[post] == nil {
 			return nil, missing("post not found")
 		}
@@ -1470,6 +1536,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		return nil, nil
 	case "React":
 		target, reaction := arg("target"), arg("reaction")
+		if _, ok := s.db.s.V2Posts[target]; ok {
+			return s.v2DispatchLocked(ctx, caller, "ReactV2Bridge", raw)
+		}
 		if s.db.s.Posts[target] == nil && s.db.s.Comments[target] == nil {
 			return nil, missing("reaction target not found")
 		}
@@ -1507,6 +1576,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		}
 		return out, nil
 	default:
+		if strings.HasPrefix(method, "CreateServer") || strings.HasPrefix(method, "GetServer") || strings.HasPrefix(method, "UpdateServer") || strings.HasPrefix(method, "ListServer") || strings.HasPrefix(method, "DiscoverServer") || strings.HasPrefix(method, "JoinServer") || strings.HasPrefix(method, "RequestServer") || strings.HasPrefix(method, "ApproveServer") || strings.HasPrefix(method, "RejectServer") || strings.HasPrefix(method, "InviteToServer") || strings.HasPrefix(method, "AcceptServer") || strings.HasPrefix(method, "LeaveServer") || strings.HasPrefix(method, "RemoveServer") || strings.HasPrefix(method, "FindServer") || strings.HasPrefix(method, "SetServer") || strings.HasPrefix(method, "CreateGroup") || strings.HasPrefix(method, "UpdateGroup") || strings.HasPrefix(method, "DeleteGroup") || strings.HasPrefix(method, "DiscoverGroup") || strings.HasPrefix(method, "JoinGroup") || strings.HasPrefix(method, "RequestGroup") || strings.HasPrefix(method, "ApproveGroup") || strings.HasPrefix(method, "RejectGroup") || strings.HasPrefix(method, "InviteToGroup") || strings.HasPrefix(method, "AcceptGroup") || strings.HasPrefix(method, "LeaveGroup") || strings.HasPrefix(method, "RemoveGroup") || strings.HasPrefix(method, "ListGroup") || strings.HasPrefix(method, "CreatePost") || strings.HasPrefix(method, "EditPost") || strings.HasPrefix(method, "DiscoverPost") || strings.HasPrefix(method, "SearchPost") || strings.HasPrefix(method, "GetThread") || strings.HasPrefix(method, "CommentServer") || strings.HasPrefix(method, "SharePost") || strings.HasPrefix(method, "ListNotification") || strings.HasPrefix(method, "MarkNotification") || method == "Comment" || method == "ApplyManifest" || method == "Batch" || method == "Sync" {
+			return s.v2DispatchLocked(ctx, caller, method, raw)
+		}
+		if method == "DiscoverProtocol" || method == "GetSchema" || method == "GetHelp" || method == "ListPresets" || method == "ApplyPreset" || method == "ListTransports" {
+			return v2DiscoveryRequest(method, raw)
+		}
 		return nil, missing("unknown method")
 	}
 }

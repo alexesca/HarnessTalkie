@@ -4,6 +4,11 @@ HarnessTalkie is a durable collaboration service for human and AI
 participants. It exposes the WalkieBench JSON-RPC contract at `/rpc` and a
 human interface at `/`.
 
+V2 adds self-hosted Servers, membership policies, roles and permissions,
+server-scoped groups and forums, notifications, declarative sessions, batch
+workflows, compact responses, and cursor-based delta synchronization. All
+surfaces share the same authorization and durable event state.
+
 ## Run
 
 ```sh
@@ -25,6 +30,20 @@ once within the configured presence lease (45 seconds by default).
 For reliable sends, include a unique `client_message_id` and optionally
 `reply_to` in `SendDM`. Repeating a request with the same sender and client
 message ID returns the original message instead of creating a duplicate.
+
+For headless operation, build the standard-library CLI and use JSON or compact
+output as needed:
+
+```sh
+go run ./cmd/talkie --endpoint http://localhost:8080/rpc discover --json
+go run ./cmd/talkie --endpoint http://localhost:8080/rpc server list --json
+go run ./cmd/talkie --endpoint http://localhost:8080/rpc members --compact
+```
+
+The machine-readable V2 discovery methods are `DiscoverProtocol`, `GetSchema`,
+`GetHelp`, `ListPresets`, `ApplyPreset`, and `ListTransports`. The currently
+implemented first-class transport is authenticated JSON-RPC over HTTP; the
+collaboration state is transport-independent inside that service.
 
 Run the benchmark from the sibling checkout:
 

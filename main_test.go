@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func rpcParams(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
@@ -140,5 +141,46 @@ func TestDurabilityAuthorizationAndThreads(t *testing.T) {
 	}
 	if len(thread.(Thread).Comments) != 1 || len(thread.(Thread).Comments[0].Children) != 1 {
 		t.Fatalf("reloaded thread = %#v", thread)
+	}
+}
+
+func TestV2ServerIsolationPoliciesAndReplay(t *testing.T) {
+	path := t.TempDir() + "/v2-events"
+	db, err := newStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	a, b := testIdentity(t, s, "v2-owner"), testIdentity(t, s, "v2-member")
+	created, err := s.dispatch(context.Background(), a.ID, "CreateServer", rpcParams(map[string]any{"name": "research", "join_policy": "public", "discoverable": true, "tags": []string{"research"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverView := created.(v2Server)
+	if _, err = s.dispatch(context.Background(), b.ID, "JoinServer", rpcParams(map[string]string{"server_id": serverView.ID})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.dispatch(context.Background(), b.ID, "ListServerMembers", rpcParams(map[string]string{"server_id": serverView.ID})); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := s.dispatch(context.Background(), a.ID, "CreateServer", rpcParams(map[string]any{"name": "private", "join_policy": "closed", "discoverable": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.dispatch(context.Background(), b.ID, "ListServerMembers", rpcParams(map[string]string{"server_id": closed.(v2Server).ID})); err == nil {
+		t.Fatal("cross-server member enumeration succeeded")
+	}
+	if _, err = newStore(path); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := newStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.s.Servers) != 2 {
+		t.Fatalf("replayed servers = %d", len(replayed.s.Servers))
+	}
+	if _, ok := replayed.s.Servers[serverView.ID].Members[b.ID]; !ok {
+		t.Fatal("replayed membership missing")
 	}
 }
