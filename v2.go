@@ -54,6 +54,8 @@ type v2ServerInvite struct {
 	InviteeID string `json:"invitee_id"`
 	InvitedBy string `json:"invited_by"`
 	Status    string `json:"status"`
+	CreatedAt string `json:"created_at,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 type v2GroupRecord struct {
 	ID          string            `json:"id"`
@@ -66,6 +68,15 @@ type v2GroupRecord struct {
 	Members     map[string]bool   `json:"members"`
 	Invites     map[string]string `json:"invites"`
 	Requests    map[string]string `json:"requests"`
+	Roles       map[string]string `json:"roles,omitempty"`
+	Permissions map[string]map[string]bool `json:"permissions,omitempty"`
+	JoinedAt    map[string]string `json:"joined_at,omitempty"`
+	InviteBy    map[string]string `json:"invite_by,omitempty"`
+	InviteAt    map[string]string `json:"invite_at,omitempty"`
+	InviteExpiry map[string]string `json:"invite_expiry,omitempty"`
+	RequestStatus map[string]string `json:"request_status,omitempty"`
+	RequestReason map[string]string `json:"request_reason,omitempty"`
+	RequestAt     map[string]string `json:"request_at,omitempty"`
 }
 type v2PostRecord struct {
 	Post       Post     `json:"post"`
@@ -111,8 +122,34 @@ type v2ManifestResult struct {
 	AccessRequest  *v2ServerRequest `json:"access_request,omitempty"`
 	Participants   []Participant    `json:"participants,omitempty"`
 	Groups         []Group          `json:"groups,omitempty"`
+	Contacts       []Contact        `json:"contacts,omitempty"`
+	Follows        []string         `json:"follows,omitempty"`
 	UnreadActivity int              `json:"unread_activity"`
 	Cursor         uint64           `json:"cursor"`
+}
+type v2GroupMemberView struct {
+	Participant
+	GroupID     string   `json:"group_id"`
+	GroupRole   string   `json:"group_role"`
+	Permissions []string `json:"permissions,omitempty"`
+	JoinedAt    string   `json:"joined_at,omitempty"`
+}
+type v2GroupRequestView struct {
+	ID        string `json:"id"`
+	GroupID   string `json:"group_id"`
+	Requester string `json:"requester"`
+	Reason    string `json:"reason,omitempty"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at,omitempty"`
+}
+type v2GroupInviteView struct {
+	ID        string `json:"id"`
+	GroupID   string `json:"group_id"`
+	InviteeID string `json:"invitee_id"`
+	InvitedBy string `json:"invited_by"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 type v2NotificationQuery struct {
 	AfterSequence uint64            `json:"after_sequence,omitempty"`
@@ -179,7 +216,7 @@ func v2GroupView(g *v2GroupRecord) Group {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	return Group{ID: g.ID, Name: g.Name, Members: ids}
+	return Group{ID: g.ID, ServerID: g.ServerID, Name: g.Name, Description: g.Description, OwnerID: g.OwnerID, JoinPolicy: g.JoinPolicy, Private: g.Private, MemberCount: len(ids), Members: ids}
 }
 func v2PostViewOf(p *v2PostRecord) v2PostView {
 	return v2PostView{Post: p.Post, ServerID: p.ServerID, GroupID: p.GroupID, Visibility: p.Visibility, Mentions: append([]string(nil), p.Mentions...)}
@@ -202,22 +239,69 @@ func v2RolePermissions(sr *v2ServerRecord, role string) map[string]bool {
 	}
 	return sr.RolePermissions[role]
 }
+var v2Roles = map[string]bool{"owner": true, "administrator": true, "moderator": true, "member": true, "guest": true, "agent": true}
+var v2Permissions = map[string]bool{
+	"view_server": true, "view_members": true, "send_messages": true, "invite_members": true,
+	"approve_members": true, "remove_members": true, "create_groups": true, "administer_groups": true,
+	"create_posts": true, "moderate_posts": true, "manage_roles": true, "manage_permissions": true,
+	"manage_settings": true, "view_audit": true, "administrative_visibility": true,
+}
+func v2DefaultPermission(role, permission string) bool {
+	switch role {
+	case "owner", "administrator":
+		return true
+	case "moderator":
+		return permission == "view_server" || permission == "view_members" || permission == "send_messages" || permission == "create_posts" || permission == "moderate_posts"
+	case "member", "agent":
+		return permission == "view_server" || permission == "view_members" || permission == "send_messages"
+	case "guest":
+		return permission == "view_server" || permission == "send_messages"
+	}
+	return false
+}
 func v2IsMember(sr *v2ServerRecord, id string) bool { _, ok := sr.Members[id]; return ok }
 func v2Can(sr *v2ServerRecord, caller, permission string) bool {
 	m := sr.Members[caller]
 	if m == nil {
 		return false
 	}
-	if m.Role == "owner" || m.Role == "administrator" {
+	if m.Role == "owner" {
 		return true
 	}
 	if m.Permissions != nil && v2Contains(m.Permissions, permission) {
 		return true
 	}
-	return v2RolePermissions(sr, m.Role)[permission]
+	if configured, ok := v2RolePermissions(sr, m.Role)[permission]; ok {
+		return configured
+	}
+	return v2DefaultPermission(m.Role, permission)
 }
 func v2Admin(sr *v2ServerRecord, caller string) bool {
-	return v2Can(sr, caller, "manage_members") || v2Can(sr, caller, "manage_roles")
+	return v2Can(sr, caller, "administrative_visibility")
+}
+
+func v2InitGroup(g *v2GroupRecord) {
+	if g.Members == nil { g.Members = map[string]bool{} }
+	if g.Invites == nil { g.Invites = map[string]string{} }
+	if g.Requests == nil { g.Requests = map[string]string{} }
+	if g.Roles == nil { g.Roles = map[string]string{} }
+	if g.Permissions == nil { g.Permissions = map[string]map[string]bool{} }
+	if g.JoinedAt == nil { g.JoinedAt = map[string]string{} }
+	if g.InviteBy == nil { g.InviteBy = map[string]string{} }
+	if g.InviteAt == nil { g.InviteAt = map[string]string{} }
+	if g.InviteExpiry == nil { g.InviteExpiry = map[string]string{} }
+	if g.RequestStatus == nil { g.RequestStatus = map[string]string{} }
+	if g.RequestReason == nil { g.RequestReason = map[string]string{} }
+	if g.RequestAt == nil { g.RequestAt = map[string]string{} }
+}
+func v2CanGroup(g *v2GroupRecord, caller, permission string) bool {
+	if caller == g.OwnerID { return true }
+	role := g.Roles[caller]
+	if role == "administrator" { return true }
+	if configured := g.Permissions[role]; configured != nil {
+		if allowed, ok := configured[permission]; ok { return allowed }
+	}
+	return role == "member" && (permission == "view_history" || permission == "send_messages")
 }
 func v2Audit(s *server, serverID, typ, actor, target, summary string) uint64 {
 	seq, at := s.db.nextActivitySequence(), s.db.now()
