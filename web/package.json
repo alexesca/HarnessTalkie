@@ -12,11 +12,11 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "react-router-dom": "latest"
+    "react-router-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "@playwright/test": "latest",
@@ -25,7 +25,7 @@
     "@testing-library/user-event": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "jsdom": "latest",
+    "jsdom": "^26.1.0",
     "vitest": "latest"
   }
 }

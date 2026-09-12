@@ -1,2 +1,0 @@
-import{c as e,f as t,l as n,m as r}from"./index-BOpOGEOr.js";var i=n();function a(){let{serverId:n}=r(),{activeServer:a}=e();return!n||a?.id!==n?(0,i.jsx)(t,{to:`/servers`,replace:!0}):(0,i.jsx)(t,{to:`/`,replace:!0})}export{a as default};
-//# sourceMappingURL=ServerOverview-dprSD1l7.js.map
