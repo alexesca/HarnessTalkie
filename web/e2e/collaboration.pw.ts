@@ -15,11 +15,12 @@ async function rpc<T>(request: APIRequestContext, method: string, params: unknow
   return body.result as T
 }
 
-async function connect(page: Page, name: string, token = '') {
-  await page.getByLabel('Identity name').fill(name)
-  if (token) await page.getByLabel('Session token for an existing identity').fill(token)
-  await page.getByRole('button', { name: 'Connect', exact: true }).click()
-  await expect(page.getByTestId('identity-status')).toHaveText('Connected')
+async function connect(page: Page, name: string, password: string) {
+  await page.getByLabel('Username').fill(name)
+  await page.getByRole('textbox', { name: 'Password', exact: true }).fill(password)
+  await page.getByRole('textbox', { name: 'Confirm password', exact: true }).fill(password)
+  await page.getByRole('button', { name: 'Create secure identity', exact: true }).click()
+  await expect(page.getByTestId('identity-status')).toContainText('Connected as')
 }
 
 test.describe('human collaboration application', () => {
@@ -29,8 +30,9 @@ test.describe('human collaboration application', () => {
     const serverName = `Playwright workspace ${suffix}`
     const groupName = `Review room ${suffix}`
     const peerName = `Playwright agent ${suffix}`
+    const password = `Playwright password ${suffix}!`
 
-    const identity = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: identityName })
+    const identity = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: identityName, password })
     const server = await rpc<Server>(request, 'CreateServer', {
       name: serverName,
       description: 'A real backend E2E workspace',
@@ -54,8 +56,8 @@ test.describe('human collaboration application', () => {
     await rpc(request, 'JoinServer', { server_id: server.id }, peer.session_token)
 
     await page.goto('/')
-    await expect(page.getByRole('heading', { name: /Collaboration without the ceremony/i })).toBeVisible()
-    await connect(page, identityName, identity.session_token)
+    await expect(page.getByRole('heading', { name: /Start your workspace/i })).toBeVisible()
+    await connect(page, identityName, password)
 
     await page.getByRole('button', { name: serverName }).click()
     await expect(page.getByRole('button', { name: serverName })).toHaveAttribute('aria-current', 'page')
@@ -137,12 +139,11 @@ test.describe('human collaboration application', () => {
 
   test('onboards a connected identity with no joined Servers and focuses creation', async ({ page, request }) => {
     const name = `First server user ${Date.now()}-${Math.floor(Math.random() * 10000)}`
-    const identity = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: name })
+    const password = `First server password ${Date.now()}!`
+    const identity = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: name, password })
     await page.goto('/')
-    await connect(page, name, identity.session_token)
-    await expect(page.getByRole('heading', { name: 'Create your first Server.' })).toBeVisible()
-    await page.getByRole('link', { name: 'Create a Server', exact: true }).click()
-    await expect(page).toHaveURL(/\/servers\?intent=create$/)
+    await connect(page, name, password)
+    await expect(page.getByRole('heading', { name: 'Create your first Server', exact: true })).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Server name' })).toBeFocused()
     await page.setViewportSize({ width: 360, height: 740 })
     await page.getByRole('button', { name: 'Open navigation' }).click()
@@ -153,7 +154,8 @@ test.describe('human collaboration application', () => {
 
   test('requires an agent to join before showing and replying to its Server DM', async ({ page, request }) => {
     const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`
-    const human = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: `External DM human ${suffix}` })
+    const humanPassword = `External human password ${suffix}!`
+    const human = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: `External DM human ${suffix}`, password: humanPassword })
     const agent = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: `External DM agent ${suffix}` })
     const server = await rpc<Server>(request, 'CreateServer', { name: `Agent registration ${suffix}`, join_policy: 'public', discoverable: true }, human.session_token)
     await rpc(request, 'PublishProfile', { display_name: agent.display_name, kind: 'agent', harness: 'playwright' }, agent.session_token)
@@ -162,7 +164,7 @@ test.describe('human collaboration application', () => {
     await rpc(request, 'SendDM', { server_id: server.id, to: human.id, content: 'Agent message after joining' }, agent.session_token)
 
     await page.goto('/')
-    await connect(page, human.display_name, human.session_token)
+    await connect(page, human.display_name, humanPassword)
     await page.getByRole('link', { name: 'Members', exact: true }).click()
     await expect(page.getByTestId('server-members-visible').getByRole('heading', { name: agent.display_name, exact: true })).toBeVisible()
     await page.getByRole('link', { name: 'Inbox', exact: true }).click()
@@ -180,7 +182,8 @@ test.describe('human collaboration application', () => {
     const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`
     const ownerName = `Playwright owner ${suffix}`
     const agentName = `Playwright agent ${suffix}`
-    const owner = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: ownerName })
+    const ownerPassword = `Owner password ${suffix}!`
+    const owner = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: ownerName, password: ownerPassword })
     const agent = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: agentName })
     const server = await rpc<Server>(request, 'CreateServer', {
       name: `Approval workspace ${suffix}`,
@@ -190,7 +193,7 @@ test.describe('human collaboration application', () => {
     await rpc(request, 'RequestServerAccess', { server_id: server.id, reason: 'E2E approval' }, agent.session_token)
 
     await page.goto('/')
-    await connect(page, ownerName, owner.session_token)
+    await connect(page, ownerName, ownerPassword)
     await page.goto('/settings')
     await page.getByLabel('Open Server administration').fill(server.id)
     await page.getByRole('button', { name: 'Open', exact: true }).click()

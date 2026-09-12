@@ -8,7 +8,7 @@ type Session = {
   servers: Server[]
   serversLoading: boolean
   serversError: string
-  connect: (name: string, token?: string) => Promise<Identity>
+  connect: (name: string, password?: string) => Promise<Identity>
   setActiveServer: (server?: Server) => void
   refreshServers: () => Promise<Server[]>
   call: <T>(method: string, params?: unknown, signal?: AbortSignal) => Promise<T>
@@ -54,8 +54,13 @@ export function SessionProvider({ children }: PropsWithChildren) {
   }, [setActiveServer])
   const refreshServers = useCallback(() => loadServers(identity?.session_token), [identity?.session_token, loadServers])
   useEffect(() => { if (identity?.session_token && loadedToken.current !== identity.session_token) void loadServers(identity.session_token).catch(() => {}) }, [identity?.session_token, loadServers])
-  const connect = useCallback(async (name: string, token = '') => {
-    const next = await rpc<Identity>('CreateOrLoadIdentity', { identity: name.trim() || 'human' }, token.trim() || identity?.session_token)
+  useEffect(() => {
+    if (!identity?.session_token) return
+    const timer = window.setInterval(() => { void loadServers(identity.session_token).catch(() => {}) }, 10000)
+    return () => window.clearInterval(timer)
+  }, [identity?.session_token, loadServers])
+  const connect = useCallback(async (name: string, password = '') => {
+    const next = await rpc<Identity>('CreateOrLoadIdentity', { identity: name.trim() || 'human', password }, '')
     sessionStorage.setItem('ht.session.v2', JSON.stringify(next))
     setIdentity(next)
     await loadServers(next.session_token)

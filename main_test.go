@@ -83,6 +83,51 @@ func TestExistingIdentityRequiresBearerSession(t *testing.T) {
 	}
 }
 
+func TestPasswordIdentityLoginAndHumanReferences(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	created, err := s.dispatch(context.Background(), "", "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": "Ada Lovelace", "password": "correct horse battery staple"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := created.(Identity)
+	if identity.Reference == "" || strings.Contains(identity.Reference, identity.ID) {
+		t.Fatalf("reference = %q", identity.Reference)
+	}
+	if db.s.Identities[identity.ID].PasswordHash == "" || strings.Contains(db.s.Identities[identity.ID].PasswordHash, "correct horse") {
+		t.Fatal("password was not hashed")
+	}
+	if _, err = s.dispatch(context.Background(), "", "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": "Ada Lovelace", "password": "wrong password value"})); err == nil {
+		t.Fatal("wrong password was accepted")
+	}
+	resumed, err := s.dispatch(context.Background(), "", "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": "Ada Lovelace", "password": "correct horse battery staple"}))
+	if err != nil || resumed.(Identity).ID != identity.ID {
+		t.Fatalf("password login = %#v, %v", resumed, err)
+	}
+}
+
+func TestTypingIndicatorsAreScopedAndExpire(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	a, b := testIdentity(t, s, "typing-a"), testIdentity(t, s, "typing-b")
+	workspace := v2DispatchForTest(t, s, a.ID, "CreateServer", map[string]any{"name": "Typing", "join_policy": "public"}).(v2Server)
+	v2DispatchForTest(t, s, b.ID, "JoinServer", map[string]string{"server_id": workspace.ID})
+	v2DispatchForTest(t, s, a.ID, "SetTyping", map[string]any{"server_id": workspace.ID, "with": b.ID, "typing": true})
+	indicators := v2DispatchForTest(t, s, b.ID, "GetTyping", map[string]any{"server_id": workspace.ID, "with": a.ID}).([]TypingIndicator)
+	if len(indicators) != 1 || indicators[0].IdentityID != a.ID {
+		t.Fatalf("typing = %#v", indicators)
+	}
+	if _, err = s.dispatch(context.Background(), "", "GetTyping", rpcParams(map[string]string{"server_id": workspace.ID, "with": a.ID})); err == nil {
+		t.Fatal("unauthenticated typing lookup was accepted")
+	}
+}
+
 func TestDiscoveryCursorAndIdempotency(t *testing.T) {
 	db, err := newStore("")
 	if err != nil {

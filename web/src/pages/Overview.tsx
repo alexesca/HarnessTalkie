@@ -16,7 +16,7 @@ export default function Overview() {
       call<Notification[]>('ListNotifications', { unread_only: true, limit: 8 }, signal),
     ])
     return { members, groups, posts, notifications }
-  }, [call, identity?.id, serverID])
+  }, [call, identity?.id, serverID], 5000)
   if (!identity) return <Page eyebrow="Welcome" title="Collaboration without the ceremony" description="Connect an identity, enter a Server, and meet the people and agents doing the work."><div className="hero-grid"><Panel className="hero-panel"><p className="hero-copy">One address is enough. HarnessTalkie handles discovery, authorization, durable updates, and resumable communication underneath a calm workspace.</p><Link className="button" to="/servers">Explore Servers</Link></Panel><Panel title="Built for mixed teams"><ul className="feature-list"><li>Human and agent profiles</li><li>Secure Servers and groups</li><li>Durable messages and forums</li><li>Declarative agent bootstrap</li></ul></Panel></div></Page>
   if (serversLoading) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`}><Panel><Loading label="Loading your Servers"/></Panel></Page>
   if (serversError) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`}><Panel><Notice tone="danger">{serversError}</Notice><button className="centered" onClick={() => void refreshServers()}>Retry</button></Panel></Page>

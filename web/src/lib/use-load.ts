@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { messageForError } from './rpc'
 
-export function useLoad<T>(load: (signal: AbortSignal) => Promise<T>, dependencies: readonly unknown[]) {
+export function useLoad<T>(load: (signal: AbortSignal) => Promise<T>, dependencies: readonly unknown[], pollMs = 0) {
   const [data, setData] = useState<T>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -19,5 +19,10 @@ export function useLoad<T>(load: (signal: AbortSignal) => Promise<T>, dependenci
     void refresh(controller.signal)
     return () => controller.abort()
   }, [refresh])
+  useEffect(() => {
+    if (!pollMs) return
+    const timer = window.setInterval(() => { void refresh() }, pollMs)
+    return () => window.clearInterval(timer)
+  }, [pollMs, refresh])
   return { data, error, loading, refresh: () => refresh() }
 }

@@ -17,6 +17,7 @@ import (
 
 type v2Server struct {
 	ID                string   `json:"id"`
+	Reference         string   `json:"reference,omitempty"`
 	Name              string   `json:"name"`
 	Description       string   `json:"description,omitempty"`
 	Purpose           string   `json:"purpose,omitempty"`
@@ -223,6 +224,9 @@ func v2Strings(raw map[string]json.RawMessage, key string) []string {
 
 func v2ServerView(r *v2ServerRecord) v2Server {
 	x := r.Server
+	if x.Reference == "" {
+		x.Reference = humanReference(x.Name, x.ID)
+	}
 	x.MemberCount = len(r.Members)
 	return x
 }
@@ -834,7 +838,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			return nil, bad("invalid join policy")
 		}
 		id := s.db.nextID("server")
-		sr := &v2ServerRecord{Server: v2Server{ID: id, Name: p.Name, Description: p.Description, Purpose: p.Purpose, Topics: p.Topics, Tags: p.Tags, OwnerID: caller, JoinPolicy: p.JoinPolicy, Capabilities: p.Capabilities, Rules: p.Rules, Discoverable: p.Discoverable, ConnectionMethods: p.ConnectionMethods, Version: "2"}, Members: map[string]*v2MemberRecord{}, RolePermissions: map[string]map[string]bool{}}
+		sr := &v2ServerRecord{Server: v2Server{ID: id, Reference: humanReference(p.Name, id), Name: p.Name, Description: p.Description, Purpose: p.Purpose, Topics: p.Topics, Tags: p.Tags, OwnerID: caller, JoinPolicy: p.JoinPolicy, Capabilities: p.Capabilities, Rules: p.Rules, Discoverable: p.Discoverable, ConnectionMethods: p.ConnectionMethods, Version: "2"}, Members: map[string]*v2MemberRecord{}, RolePermissions: map[string]map[string]bool{}}
 		sr.Members[caller] = &v2MemberRecord{IdentityID: caller, Role: "owner", JoinedAt: s.db.now().Format(time.RFC3339Nano)}
 		if e := commit("v2_server", sr, func() { s.db.s.Servers[id] = sr; v2Audit(s, id, "server_created", caller, id, "Server created") }); e != nil {
 			return nil, e
@@ -2181,7 +2185,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 				}
 			}
 		}
-		return v2ManifestResult{Identity: Identity{ID: caller, DisplayName: s.db.s.Identities[caller].DisplayName, SessionToken: s.db.s.Identities[caller].Token}, Server: v2ServerView(sr), Membership: membership, AccessRequest: req, Participants: parts, Groups: groups, Contacts: contacts, Follows: follows, UnreadActivity: unread, Cursor: s.db.s.Next}, nil
+		return v2ManifestResult{Identity: Identity{ID: caller, DisplayName: s.db.s.Identities[caller].DisplayName, Reference: humanReference(s.db.s.Identities[caller].DisplayName, caller), SessionToken: s.db.s.Identities[caller].Token}, Server: v2ServerView(sr), Membership: membership, AccessRequest: req, Participants: parts, Groups: groups, Contacts: contacts, Follows: follows, UnreadActivity: unread, Cursor: s.db.s.Next}, nil
 	case "Batch":
 		var b struct {
 			Operations []struct {

@@ -42,6 +42,16 @@ test('loads joined Servers, recovers a stale selection, and switches scoped navi
   expect(calls.filter(call => call.method === 'ListServers')).toHaveLength(1)
 })
 
+test('keeps workspace navigation locked until a password identity is authenticated', async () => {
+  sessionStorage.removeItem('ht.session.v2')
+  localStorage.removeItem('ht.active-server.v2')
+  renderShell()
+  expect(await screen.findByRole('heading', { name: 'Start your workspace' })).toBeVisible()
+  expect(screen.queryByRole('complementary', { name: 'Servers' })).not.toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: /Username/ })).toBeVisible()
+  expect(screen.getByLabelText('Password', { exact: true })).toBeVisible()
+})
+
 test('synchronizes a different Server deep link through GetServer', async () => {
   seedSession(server)
   const calls = mockRPC({ ListServers: [server, second], GetServer: second })

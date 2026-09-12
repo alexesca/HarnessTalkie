@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { Suspense, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Menu, X } from 'lucide-react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useSession } from '../session'
@@ -7,14 +7,11 @@ import type { Server } from '../lib/types'
 import { Loading } from './ui'
 import { ServerRail } from './ServerRail'
 import { WorkspaceNav } from './WorkspaceNav'
+import { AuthScreen, FirstServerWizard } from './Onboarding'
 
 export function AppShell() {
-  const { identity, activeServer, servers, serversLoading, serversError, connect, disconnect, setActiveServer, refreshServers, call } = useSession()
-  const [name, setName] = useState(identity?.display_name || '')
-  const [token, setToken] = useState('')
-  const [error, setError] = useState('')
+  const { identity, activeServer, servers, serversLoading, serversError, disconnect, setActiveServer, refreshServers, call } = useSession()
   const [routeError, setRouteError] = useState('')
-  const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
   const drawer = useRef<HTMLDivElement>(null)
   const menuButton = useRef<HTMLButtonElement>(null)
@@ -39,10 +36,6 @@ export function AppShell() {
     return () => { (menuButton.current || previous)?.focus() }
   }, [open])
 
-  async function submit(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError('')
-    try { const next = await connect(name, token); setName(next.display_name); setToken(''); navigate('/') } catch (reason) { setError(messageForError(reason)) } finally { setBusy(false) }
-  }
   function handleDrawerKey(event: KeyboardEvent) {
     if (event.key === 'Escape') { event.preventDefault(); setOpen(false); return }
     if (event.key !== 'Tab' || !drawer.current) return
@@ -53,6 +46,7 @@ export function AppShell() {
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
   }
   const close = () => setOpen(false)
+  if (!identity) return <div className="app-shell unauthenticated"><a className="skip-link" href="#main-content">Skip to content</a><AuthScreen onSuccess={() => navigate('/')}/></div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     {open && <button className="nav-backdrop" aria-label="Close navigation" onClick={close}/>}
@@ -64,9 +58,8 @@ export function AppShell() {
       {identity && serversError && <button className="rail-retry" onClick={() => void refreshServers()}>Retry Servers</button>}
     </div>
     <div className="workspace">
-      <header className="topbar"><button ref={menuButton} className="menu-button" onClick={() => setOpen(true)} aria-label="Open navigation" aria-expanded={open}><Menu size={22}/></button><div className="connection" data-testid="identity-status"><i className={identity ? 'connected' : ''}/>{identity ? 'Connected' : 'Local workspace'}</div><form className="identity-form" onSubmit={submit}><label className="sr-only" htmlFor="identity-name">Identity name</label><input id="identity-name" data-testid="identity-id" value={name} onChange={event => setName(event.target.value)} placeholder="Your name or handle" autoComplete="username"/><label className="sr-only" htmlFor="identity-token">Session token for an existing identity</label><input id="identity-token" data-testid="identity-token" type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="Session token (returning)" autoComplete="current-password"/><button data-testid="identity-load" disabled={busy}>{busy ? 'Connecting…' : identity ? 'Reconnect' : 'Connect'}</button></form></header>
-      {error && <div className="top-error" role="alert">{error}</div>}
-      <main id="main-content">{routeError ? <div className="route-loading"><div className="notice danger" role="alert">{routeError}</div></div> : routeSyncing ? <div className="route-loading"><Loading label="Opening Server"/></div> : <Suspense fallback={<div className="route-loading"><h1 className="sr-only">Loading HarnessTalkie</h1><Loading/></div>}><Outlet/></Suspense>}</main>
+      <header className="topbar"><button ref={menuButton} className="menu-button" onClick={() => setOpen(true)} aria-label="Open navigation" aria-expanded={open}><Menu size={22}/></button><div className="connection" data-testid="identity-status"><i className="connected"/>Connected as {identity.display_name}</div><span className="topbar-reference" title={identity.id}>{identity.reference || identity.id}</span></header>
+      <main id="main-content">{routeError ? <div className="route-loading"><div className="notice danger" role="alert">{routeError}</div></div> : routeSyncing ? <div className="route-loading"><Loading label="Opening Server"/></div> : serversLoading && location.pathname === '/' ? <div className="route-loading"><Loading label="Loading your Servers"/></div> : !servers.length && location.pathname === '/' ? <FirstServerWizard/> : <Suspense fallback={<div className="route-loading"><h1 className="sr-only">Loading HarnessTalkie</h1><Loading/></div>}><Outlet/></Suspense>}</main>
     </div>
   </div>
 }

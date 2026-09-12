@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -27,6 +28,7 @@ import (
 type Identity struct {
 	ID           string `json:"id"`
 	DisplayName  string `json:"display_name"`
+	Reference    string `json:"reference,omitempty"`
 	SessionToken string `json:"session_token,omitempty"`
 }
 type Profile struct {
@@ -109,6 +111,10 @@ type MessagePage struct {
 	NextCursor uint64    `json:"next_cursor"`
 	More       bool      `json:"more"`
 }
+type TypingIndicator struct {
+	IdentityID string    `json:"identity_id"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
 type EventQuery struct {
 	AfterSequence uint64 `json:"after_sequence,omitempty"`
 	WaitMS        int    `json:"wait_ms,omitempty"`
@@ -178,12 +184,13 @@ type ResumeResult struct {
 
 type identityRecord struct {
 	Identity
-	Profile    Profile         `json:"profile"`
-	Name       string          `json:"name"`
-	Token      string          `json:"token"`
-	LastSeen   time.Time       `json:"last_seen"`
-	LastActive time.Time       `json:"last_active"`
-	Contacts   map[string]bool `json:"contacts"`
+	Profile      Profile         `json:"profile"`
+	Name         string          `json:"name"`
+	Token        string          `json:"token"`
+	LastSeen     time.Time       `json:"last_seen"`
+	LastActive   time.Time       `json:"last_active"`
+	Contacts     map[string]bool `json:"contacts"`
+	PasswordHash string          `json:"password_hash,omitempty"`
 }
 type groupRecord struct {
 	Group
@@ -568,6 +575,74 @@ func identityID(name string) string {
 	sum := sha256.Sum256([]byte("harnesstalkie:" + name))
 	return fmt.Sprintf("id-%x", sum[:8])
 }
+
+const minPasswordLength = 12
+const passwordIterations = 120000
+
+func humanReference(name, id string) string {
+	slug := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range slug {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+			b.WriteByte('-')
+		}
+	}
+	slug = strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "member"
+	}
+	sum := sha256.Sum256([]byte("harnesstalkie:reference:" + id))
+	return fmt.Sprintf("%s-%x", slug, sum[:3])
+}
+
+func hashPassword(password string) (string, error) {
+	if len([]rune(password)) < minPasswordLength {
+		return "", bad(fmt.Sprintf("password must be at least %d characters", minPasswordLength))
+	}
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, salt)
+	mac.Write([]byte(password))
+	derived := mac.Sum(nil)
+	for i := 1; i < passwordIterations; i++ {
+		mac = hmac.New(sha256.New, salt)
+		mac.Write(derived)
+		derived = mac.Sum(nil)
+	}
+	return fmt.Sprintf("v1$%d$%s$%s", passwordIterations, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(derived)), nil
+}
+
+func verifyPassword(password, encoded string) bool {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 4 || parts[0] != "v1" {
+		return false
+	}
+	iterations, err := strconv.Atoi(parts[1])
+	if err != nil || iterations < 10000 || iterations > 1000000 {
+		return false
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil || len(salt) < 16 {
+		return false
+	}
+	want, err := base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, salt)
+	mac.Write([]byte(password))
+	derived := mac.Sum(nil)
+	for i := 1; i < iterations; i++ {
+		mac = hmac.New(sha256.New, salt)
+		mac.Write(derived)
+		derived = mac.Sum(nil)
+	}
+	return hmac.Equal(derived, want)
+}
 func (db *store) nextID(prefix string) string {
 	db.s.Next++
 	return fmt.Sprintf("%s-%016x", prefix, db.s.Next)
@@ -610,8 +685,9 @@ func (db *store) recordActivity(event ActivityEvent) {
 }
 
 type server struct {
-	db   *store
-	idle time.Duration
+	db     *store
+	idle   time.Duration
+	typing map[string]TypingIndicator
 }
 
 func (s *server) auth(r *http.Request) (string, error) {
@@ -879,7 +955,7 @@ func (s *server) invitesLocked(caller string) []Invitation {
 }
 func (s *server) bootstrapLocked(caller string, includeProfiles, includeInvites, includePosts bool) Bootstrap {
 	x := s.db.s.Identities[caller]
-	b := Bootstrap{Identity: Identity{ID: x.ID, DisplayName: x.DisplayName}, UnreadDMs: 0, Cursor: s.db.s.Next}
+	b := Bootstrap{Identity: Identity{ID: x.ID, DisplayName: x.DisplayName, Reference: humanReference(x.DisplayName, x.ID)}, UnreadDMs: 0, Cursor: s.db.s.Next}
 	for _, m := range s.db.s.DMs {
 		if m.RecipientID == caller && !m.Read {
 			b.UnreadDMs++
@@ -1123,6 +1199,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 	defer s.db.mu.Unlock()
 	if method == "CreateOrLoadIdentity" {
 		name := parseArg(raw, "identity")
+		password := parseArg(raw, "password")
 		if name == "" {
 			return nil, bad("identity is required")
 		}
@@ -1139,23 +1216,36 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		}
 		x := s.db.s.Identities[id]
 		if caller == "" && x != nil {
-			return nil, denied("existing identity requires its session token")
+			if x.PasswordHash == "" {
+				return nil, denied("existing identity requires its session token")
+			}
+			if password == "" || !verifyPassword(password, x.PasswordHash) {
+				return nil, denied("invalid username or password")
+			}
 		}
 		if caller != "" && x != nil && name != x.ID && name != x.Name && name != x.DisplayName {
 			return nil, denied("session token does not match requested identity")
 		}
 		if x == nil {
+			passwordHash := ""
+			if password != "" {
+				var hashErr error
+				passwordHash, hashErr = hashPassword(password)
+				if hashErr != nil {
+					return nil, hashErr
+				}
+			}
 			token, err := newToken()
 			if err != nil {
 				return nil, err
 			}
-			x = &identityRecord{Identity: Identity{ID: id, DisplayName: name}, Name: name, Token: token, Contacts: map[string]bool{}}
+			x = &identityRecord{Identity: Identity{ID: id, DisplayName: name, Reference: humanReference(name, id)}, Name: name, Token: token, Contacts: map[string]bool{}, PasswordHash: passwordHash}
 			if err := s.db.commit("identity", x, func() { s.db.s.Identities[id] = x }); err != nil {
 				return nil, err
 			}
 		}
 		s.db.touch(id)
-		return Identity{ID: x.ID, DisplayName: x.DisplayName, SessionToken: x.Token}, nil
+		return Identity{ID: x.ID, DisplayName: x.DisplayName, Reference: humanReference(x.DisplayName, x.ID), SessionToken: x.Token}, nil
 	}
 	if isDiscoveryMethod(method) {
 		return v2DiscoveryRequest(method, raw)
@@ -1166,6 +1256,48 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 	s.db.touch(caller)
 	arg := func(k string) string { return parseArg(raw, k) }
 	switch method {
+	case "SetTyping":
+		peer, serverID := arg("with"), arg("server_id")
+		if peer == "" {
+			return nil, bad("recipient is required")
+		}
+		sr, err := s.v2DMServerLocked(caller, peer, serverID)
+		if err != nil {
+			return nil, err
+		}
+		if s.typing == nil {
+			s.typing = map[string]TypingIndicator{}
+		}
+		key := sr.Server.ID + ":" + caller + ":" + peer
+		var p struct {
+			Typing bool `json:"typing"`
+		}
+		_ = parseParams(raw, &p)
+		if p.Typing {
+			s.typing[key] = TypingIndicator{IdentityID: caller, ExpiresAt: time.Now().UTC().Add(4 * time.Second)}
+		} else {
+			delete(s.typing, key)
+		}
+		return nil, nil
+	case "GetTyping":
+		peer, serverID := arg("with"), arg("server_id")
+		if peer == "" {
+			return nil, bad("recipient is required")
+		}
+		sr, err := s.v2DMServerLocked(caller, peer, serverID)
+		if err != nil {
+			return nil, err
+		}
+		if s.typing == nil {
+			return []TypingIndicator{}, nil
+		}
+		key := sr.Server.ID + ":" + peer + ":" + caller
+		indicator, ok := s.typing[key]
+		if !ok || time.Now().UTC().After(indicator.ExpiresAt) {
+			delete(s.typing, key)
+			return []TypingIndicator{}, nil
+		}
+		return []TypingIndicator{indicator}, nil
 	case "PublishProfile":
 		var p Profile
 		if err := parseParams(raw, &p); err != nil {
@@ -1253,7 +1385,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 		return out, nil
 	case "GetCapabilities":
-		return []string{"Bootstrap", "ListParticipants", "FindPeers", "ListInvites", "ListGroups", "ListPublicPosts", "Heartbeat", "Disconnect", "ConnectAndBootstrap", "WaitForEvents", "SendDM", "GetDMHistoryPage", "ReceiveDMsPage"}, nil
+		return []string{"Bootstrap", "ListParticipants", "FindPeers", "ListInvites", "ListGroups", "ListPublicPosts", "Heartbeat", "Disconnect", "ConnectAndBootstrap", "WaitForEvents", "SendDM", "GetDMHistoryPage", "ReceiveDMsPage", "SetTyping", "GetTyping"}, nil
 	case "Heartbeat":
 		at := time.Now().UTC()
 		if err := s.db.commit("presence", map[string]any{"id": caller, "last_active": at}, func() {
@@ -1743,5 +1875,5 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("HarnessTalkie listening on %s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, &server{db: db, idle: *idle}))
+	log.Fatal(http.ListenAndServe(*addr, &server{db: db, idle: *idle, typing: map[string]TypingIndicator{}}))
 }
