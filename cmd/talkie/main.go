@@ -221,7 +221,7 @@ Examples:
   talkie --endpoint http://localhost:8080/rpc identity agent-a
   talkie server discover --json
   talkie members --server SERVER_ID --capability simulation --compact
-  talkie dm send PARTICIPANT_ID "hello"
+  talkie dm send SERVER_ID PARTICIPANT_ID "hello"
   talkie manifest session.json --json`)
 }
 func main() {
@@ -374,8 +374,8 @@ func postCommand(a []string) (string, any) {
 	return "DiscoverPosts", map[string]any{"server_id": one(a), "limit": 50}
 }
 func dmCommand(a []string) (string, any) {
-	if len(a) < 3 || a[0] != "send" {
-		fail("dm send PARTICIPANT_ID MESSAGE")
+	if len(a) < 4 || a[0] != "send" {
+		fail("dm send SERVER_ID PARTICIPANT_ID MESSAGE")
 	}
-	return "SendDM", map[string]string{"to": a[1], "content": strings.Join(a[2:], " ")}
+	return "SendDM", map[string]string{"server_id": a[1], "to": a[2], "content": strings.Join(a[3:], " ")}
 }

@@ -341,6 +341,38 @@ func v2DefaultPermission(role, permission string) bool {
 	return false
 }
 func v2IsMember(sr *v2ServerRecord, id string) bool { _, ok := sr.Members[id]; return ok }
+func (s *server) v2MembershipRole(id string) string {
+	if x := s.db.s.Identities[id]; x != nil && x.Profile.Kind == "agent" {
+		return "agent"
+	}
+	return "member"
+}
+func (s *server) v2DMServerLocked(caller, peer, requested string) (*v2ServerRecord, error) {
+	if requested != "" {
+		sr := s.db.s.Servers[requested]
+		if sr == nil {
+			return nil, missing("Server not found")
+		}
+		if !v2IsMember(sr, caller) || !v2IsMember(sr, peer) {
+			return nil, denied("both participants must join the Server before messaging")
+		}
+		return sr, nil
+	}
+	shared := []string{}
+	for id, sr := range s.db.s.Servers {
+		if v2IsMember(sr, caller) && v2IsMember(sr, peer) {
+			shared = append(shared, id)
+		}
+	}
+	sort.Strings(shared)
+	if len(shared) == 0 {
+		return nil, denied("participants must join a common Server before messaging")
+	}
+	if len(shared) > 1 {
+		return nil, bad("server_id is required when participants share multiple Servers")
+	}
+	return s.db.s.Servers[shared[0]], nil
+}
 func v2Can(sr *v2ServerRecord, caller, permission string) bool {
 	m := sr.Members[caller]
 	if m == nil {
@@ -942,8 +974,9 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			return nil, denied("Server is closed")
 		}
 	allowed:
-		s.v2AddMemberLocked(sr, caller, "agent")
-		if e := s.v2PersistLocked("v2_member_add", map[string]string{"server_id": sr.Server.ID, "participant": caller, "role": "agent"}); e != nil {
+		role := s.v2MembershipRole(caller)
+		s.v2AddMemberLocked(sr, caller, role)
+		if e := s.v2PersistLocked("v2_member_add", map[string]string{"server_id": sr.Server.ID, "participant": caller, "role": role}); e != nil {
 			return nil, e
 		}
 		v2Audit(s, sr.Server.ID, "member_joined", caller, caller, "Joined Server")
@@ -988,7 +1021,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if method == "ApproveServerRequest" {
 			r.Status = "approved"
 			if !v2IsMember(sr, r.Requester) {
-				s.v2AddMemberLocked(sr, r.Requester, "agent")
+				s.v2AddMemberLocked(sr, r.Requester, s.v2MembershipRole(r.Requester))
 				v2Audit(s, sr.Server.ID, "member_joined", caller, r.Requester, "Admitted approved Server member")
 			}
 		} else {
@@ -1056,8 +1089,9 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			return nil, denied("invitation expired")
 		}
 		i.Status = "accepted"
-		s.v2AddMemberLocked(sr, caller, "agent")
-		if e := s.v2PersistLocked("v2_member_add", map[string]string{"server_id": sr.Server.ID, "participant": caller, "role": "agent"}); e != nil {
+		role := s.v2MembershipRole(caller)
+		s.v2AddMemberLocked(sr, caller, role)
+		if e := s.v2PersistLocked("v2_member_add", map[string]string{"server_id": sr.Server.ID, "participant": caller, "role": role}); e != nil {
 			return nil, e
 		}
 		v2Audit(s, sr.Server.ID, "member_joined", caller, caller, "Joined Server by invitation")
@@ -1962,6 +1996,12 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		_ = v2Map(raw, &q)
 		out := []v2Notification{}
 		for _, n := range s.db.s.V2Notifications[caller] {
+			if n.Type == "dm" {
+				sr := s.db.s.Servers[n.ServerID]
+				if sr == nil || !v2IsMember(sr, caller) {
+					continue
+				}
+			}
 			if n.Sequence <= q.AfterSequence || (q.UnreadOnly && n.Read) {
 				continue
 			}
@@ -2041,14 +2081,14 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 				for _, invite := range s.db.s.V2Invites {
 					if invite.ServerID == sr.Server.ID && invite.InviteeID == caller && invite.Status == "pending" {
 						invite.Status = "accepted"
-						s.v2AddMemberLocked(sr, caller, "agent")
+						s.v2AddMemberLocked(sr, caller, s.v2MembershipRole(caller))
 						membership = "joined"
 						break
 					}
 				}
 			}
 			if !v2IsMember(sr, caller) && sr.Server.JoinPolicy == "public" && (x.Membership.Join == "if-allowed" || x.Membership.Join == "always") {
-				s.v2AddMemberLocked(sr, caller, "agent")
+				s.v2AddMemberLocked(sr, caller, s.v2MembershipRole(caller))
 				membership = "joined"
 			} else if !v2IsMember(sr, caller) && x.Membership.RequestIfRequired {
 				for _, r := range s.db.s.V2Requests {
@@ -2397,7 +2437,7 @@ func v2DiscoveryRequest(method string, raw json.RawMessage) (any, error) {
 		}
 		return map[string]any{"name": "harnesstalkie/v2", "version": "2.0", "schema": map[string]any{"type": "object", "required": []string{"apiVersion", "kind", "server", "identity"}, "properties": map[string]any{"apiVersion": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "server": map[string]any{"type": "string"}, "identity": map[string]any{"type": "object"}}}, "operations": operationSchemas}, nil
 	case "GetHelp":
-		return map[string]any{"commands": []string{"discover", "server", "members", "agents", "groups", "posts", "dm", "inbox", "requests", "invites", "roles", "permissions", "security", "status", "join"}, "examples": []string{"discover --json", "join SERVER_ID --json", "members --capability simulation --compact", "dm send PARTICIPANT_ID MESSAGE"}, "manifest": "ApplyManifest", "batch": "Batch"}, nil
+		return map[string]any{"commands": []string{"discover", "server", "members", "agents", "groups", "posts", "dm", "inbox", "requests", "invites", "roles", "permissions", "security", "status", "join"}, "examples": []string{"discover --json", "join SERVER_ID --json", "members --capability simulation --compact", "dm send SERVER_ID PARTICIPANT_ID MESSAGE"}, "manifest": "ApplyManifest", "batch": "Batch"}, nil
 	case "ListPresets":
 		return []map[string]any{{"name": "minimal", "description": "identity and presence", "manifest": map[string]any{"apiVersion": "harnesstalkie/v2", "kind": "Session", "server": "server", "identity": map[string]any{"name": "agent"}}}, {"name": "collaborator", "description": "discover and synchronize collaboration", "manifest": map[string]any{"apiVersion": "harnesstalkie/v2", "kind": "Session", "server": "server", "identity": map[string]any{"name": "agent"}, "membership": map[string]any{"join": "if-allowed", "requestIfRequired": true}, "discover": map[string]any{"limit": 5}, "sync": map[string]any{"inbox": true, "mentions": true}}}}, nil
 	case "ApplyPreset":

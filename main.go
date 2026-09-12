@@ -921,7 +921,8 @@ func (s *server) resolveParticipantLocked(query string) *identityRecord {
 }
 func (s *server) eventVisibleLocked(caller string, e ActivityEvent) bool {
 	if e.Type == "dm" && e.Message != nil {
-		return e.Message.SenderID == caller || e.Message.RecipientID == caller
+		sr := s.db.s.Servers[e.Message.ServerID]
+		return sr != nil && v2IsMember(sr, caller) && (e.Message.SenderID == caller || e.Message.RecipientID == caller)
 	}
 	if e.Type == "invite" {
 		return e.TargetID == caller || e.ActorID == caller
@@ -1307,15 +1308,14 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Identities[req.To] == nil {
 			return nil, missing("recipient not found")
 		}
-		if req.ServerID != "" {
-			sr := s.db.s.Servers[req.ServerID]
-			if sr == nil || !v2IsMember(sr, caller) || !v2IsMember(sr, req.To) {
-				return nil, denied("both participants must belong to the scoped Server")
-			}
-			if !v2Can(sr, caller, "send_messages") {
-				return nil, denied("send_messages permission required")
-			}
+		sr, err := s.v2DMServerLocked(caller, req.To, req.ServerID)
+		if err != nil {
+			return nil, err
 		}
+		if !v2Can(sr, caller, "send_messages") {
+			return nil, denied("send_messages permission required")
+		}
+		req.ServerID = sr.Server.ID
 		if req.ClientMessageID != "" {
 			if m := s.db.s.DMByClientID[caller+"\x00"+req.ClientMessageID]; m != nil {
 				return *m, nil
@@ -1342,17 +1342,13 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if with == "" || s.db.s.Identities[with] == nil {
 			return nil, missing("participant not found")
 		}
-		sameServer := false
-		if serverID := arg("server_id"); serverID != "" {
-			sr := s.db.s.Servers[serverID]
-			sameServer = sr != nil && v2IsMember(sr, caller) && v2IsMember(sr, with)
-		}
-		if with != caller && !sameServer && !s.db.s.Identities[caller].Contacts[with] && !hasDM(s.db.s.DMs, caller, with) {
-			return nil, denied("DM history is private")
+		sr, err := s.v2DMServerLocked(caller, with, arg("server_id"))
+		if err != nil {
+			return nil, err
 		}
 		out := []Message{}
 		for _, m := range s.db.s.DMs {
-			if (m.SenderID == caller && m.RecipientID == with) || (m.SenderID == with && m.RecipientID == caller) {
+			if m.ServerID == sr.Server.ID && ((m.SenderID == caller && m.RecipientID == with) || (m.SenderID == with && m.RecipientID == caller)) {
 				out = append(out, *m)
 			}
 		}
@@ -1365,25 +1361,29 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if q.With == "" || s.db.s.Identities[q.With] == nil {
 			return nil, missing("participant not found")
 		}
-		sameServer := false
-		if q.ServerID != "" {
-			sr := s.db.s.Servers[q.ServerID]
-			sameServer = sr != nil && v2IsMember(sr, caller) && v2IsMember(sr, q.With)
-		}
-		if q.With != caller && !sameServer && !s.db.s.Identities[caller].Contacts[q.With] && !hasDM(s.db.s.DMs, caller, q.With) {
-			return nil, denied("DM history is private")
+		sr, err := s.v2DMServerLocked(caller, q.With, q.ServerID)
+		if err != nil {
+			return nil, err
 		}
 		out := []Message{}
 		for _, m := range s.db.s.DMs {
-			if m.Sequence > q.AfterSequence && ((m.SenderID == caller && m.RecipientID == q.With) || (m.SenderID == q.With && m.RecipientID == caller)) {
+			if m.ServerID == sr.Server.ID && m.Sequence > q.AfterSequence && ((m.SenderID == caller && m.RecipientID == q.With) || (m.SenderID == q.With && m.RecipientID == caller)) {
 				out = append(out, *m)
 			}
 		}
 		return pageMessages(out, q.Limit), nil
 	case "ReceiveDMs":
+		serverID := arg("server_id")
+		if serverID != "" {
+			sr := s.db.s.Servers[serverID]
+			if sr == nil || !v2IsMember(sr, caller) {
+				return nil, denied("join the Server before receiving its messages")
+			}
+		}
 		out := []Message{}
 		for _, m := range s.db.s.DMs {
-			if m.RecipientID == caller && !m.Read {
+			sr := s.db.s.Servers[m.ServerID]
+			if m.RecipientID == caller && !m.Read && sr != nil && v2IsMember(sr, caller) && (serverID == "" || m.ServerID == serverID) {
 				out = append(out, *m)
 			}
 		}
@@ -1393,9 +1393,16 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if err := parseParams(raw, &q); err != nil {
 			return nil, err
 		}
+		if q.ServerID != "" {
+			sr := s.db.s.Servers[q.ServerID]
+			if sr == nil || !v2IsMember(sr, caller) {
+				return nil, denied("join the Server before receiving its messages")
+			}
+		}
 		out := []Message{}
 		for _, m := range s.db.s.DMs {
-			if m.RecipientID == caller && !m.Read && m.Sequence > q.AfterSequence {
+			sr := s.db.s.Servers[m.ServerID]
+			if m.RecipientID == caller && !m.Read && m.Sequence > q.AfterSequence && sr != nil && v2IsMember(sr, caller) && (q.ServerID == "" || m.ServerID == q.ServerID) {
 				out = append(out, *m)
 			}
 		}

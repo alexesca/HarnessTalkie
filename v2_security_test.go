@@ -27,13 +27,39 @@ func TestV2ServerScopedDMDeniesOutsiderAndNotifiesMember(t *testing.T) {
 	outsider := testIdentity(t, s, "v2-outsider")
 	serverValue := v2DispatchForTest(t, s, owner.ID, "CreateServer", map[string]any{"name": "Secure workspace", "join_policy": "public", "discoverable": true}).(v2Server)
 	v2DispatchForTest(t, s, member.ID, "JoinServer", map[string]string{"server_id": serverValue.ID})
+	if got := s.db.s.Servers[serverValue.ID].Members[member.ID].Role; got != "member" {
+		t.Fatalf("human join role = %q, want member", got)
+	}
 	if _, err = s.dispatch(context.Background(), outsider.ID, "SendDM", rpcParams(SendDMRequest{ServerID: serverValue.ID, To: member.ID, Content: "forbidden"})); err == nil {
 		t.Fatal("outsider sent a Server-scoped DM")
+	}
+	if _, err = s.dispatch(context.Background(), outsider.ID, "SendDM", rpcParams(SendDMRequest{To: member.ID, Content: "unscoped"})); err == nil {
+		t.Fatal("outsider sent an unscoped DM")
 	}
 	v2DispatchForTest(t, s, owner.ID, "SendDM", SendDMRequest{ServerID: serverValue.ID, To: member.ID, Content: "authorized"})
 	notifications := v2DispatchForTest(t, s, member.ID, "ListNotifications", map[string]any{"unread_only": true}).([]v2Notification)
 	if len(notifications) != 1 || notifications[0].Type != "dm" || notifications[0].ServerID != serverValue.ID {
 		t.Fatalf("notifications = %#v", notifications)
+	}
+}
+
+func TestV2AgentCanJoinPublicServerAndMessageMembers(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	owner := testIdentity(t, s, "agent-server-owner")
+	agent := testIdentity(t, s, "joining-agent")
+	v2DispatchForTest(t, s, agent.ID, "PublishProfile", Profile{DisplayName: "Joining Agent", Kind: "agent", Harness: "test"})
+	serverValue := v2DispatchForTest(t, s, owner.ID, "CreateServer", map[string]any{"name": "Public agent workspace", "join_policy": "public"}).(v2Server)
+	v2DispatchForTest(t, s, agent.ID, "JoinServer", map[string]string{"server_id": serverValue.ID})
+	if got := s.db.s.Servers[serverValue.ID].Members[agent.ID].Role; got != "agent" {
+		t.Fatalf("agent join role = %q, want agent", got)
+	}
+	message := v2DispatchForTest(t, s, agent.ID, "SendDM", SendDMRequest{ServerID: serverValue.ID, To: owner.ID, Content: "joined and ready"}).(Message)
+	if message.ServerID != serverValue.ID {
+		t.Fatalf("message Server = %q, want %q", message.ServerID, serverValue.ID)
 	}
 }
 

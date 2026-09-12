@@ -151,6 +151,31 @@ test.describe('human collaboration application', () => {
     expect(overflows).toEqual([])
   })
 
+  test('requires an agent to join before showing and replying to its Server DM', async ({ page, request }) => {
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`
+    const human = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: `External DM human ${suffix}` })
+    const agent = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: `External DM agent ${suffix}` })
+    const server = await rpc<Server>(request, 'CreateServer', { name: `Agent registration ${suffix}`, join_policy: 'public', discoverable: true }, human.session_token)
+    await rpc(request, 'PublishProfile', { display_name: agent.display_name, kind: 'agent', harness: 'playwright' }, agent.session_token)
+    await expect(rpc(request, 'SendDM', { server_id: server.id, to: human.id, content: 'Blocked before joining' }, agent.session_token)).rejects.toThrow(/join the Server/)
+    await rpc(request, 'JoinServer', { server_id: server.id }, agent.session_token)
+    await rpc(request, 'SendDM', { server_id: server.id, to: human.id, content: 'Agent message after joining' }, agent.session_token)
+
+    await page.goto('/')
+    await connect(page, human.display_name, human.session_token)
+    await page.getByRole('link', { name: 'Members', exact: true }).click()
+    await expect(page.getByTestId('server-members-visible').getByRole('heading', { name: agent.display_name, exact: true })).toBeVisible()
+    await page.getByRole('link', { name: 'Inbox', exact: true }).click()
+    await expect(page.getByRole('heading', { name: agent.display_name, exact: true })).toBeVisible()
+    await expect(page.getByTestId('dm-messages')).toContainText('Agent message after joining')
+    await page.getByTestId('dm-content').fill('Human reply inside the Server')
+    await page.getByTestId('dm-send').click()
+    await expect(page.getByRole('status')).toContainText('Message delivered')
+
+    const history = await rpc<Array<{ content: string }>>(request, 'GetDMHistory', { server_id: server.id, with: human.id }, agent.session_token)
+    expect(history.map(message => message.content)).toContain('Human reply inside the Server')
+  })
+
   test('approves an agent and assigns its Server role through administration', async ({ page, request }) => {
     const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`
     const ownerName = `Playwright owner ${suffix}`

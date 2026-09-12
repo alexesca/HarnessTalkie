@@ -90,6 +90,14 @@ func TestDiscoveryCursorAndIdempotency(t *testing.T) {
 	}
 	s := &server{db: db, idle: 45 * 1000000000}
 	a, b := testIdentity(t, s, "discovery-a"), testIdentity(t, s, "discovery-b")
+	created, err := s.dispatch(context.Background(), a.ID, "CreateServer", rpcParams(map[string]any{"name": "discovery", "join_policy": "public"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverID := created.(v2Server).ID
+	if _, err = s.dispatch(context.Background(), b.ID, "JoinServer", rpcParams(map[string]string{"server_id": serverID})); err != nil {
+		t.Fatal(err)
+	}
 	profile := Profile{DisplayName: "Discovery A", Repository: "repo-a", Harness: "harness-a", Capabilities: []string{"retrieval"}, CurrentWork: "integration"}
 	if _, err = s.dispatch(context.Background(), a.ID, "PublishProfile", rpcParams(profile)); err != nil {
 		t.Fatal(err)
@@ -106,11 +114,11 @@ func TestDiscoveryCursorAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	cursor := boot.(Bootstrap).Cursor
-	first, err := s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{To: b.ID, Content: "one", ClientMessageID: "one"}))
+	first, err := s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{ServerID: serverID, To: b.ID, Content: "one", ClientMessageID: "one"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{To: b.ID, Content: "one", ClientMessageID: "one"}))
+	second, err := s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{ServerID: serverID, To: b.ID, Content: "one", ClientMessageID: "one"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +132,7 @@ func TestDiscoveryCursorAndIdempotency(t *testing.T) {
 	if len(batch.Events) != 1 || batch.Events[0].Message == nil {
 		t.Fatalf("event batch = %#v", batch)
 	}
-	page, err := s.dispatch(context.Background(), b.ID, "ReceiveDMsPage", rpcParams(MessageQuery{Limit: 10}))
+	page, err := s.dispatch(context.Background(), b.ID, "ReceiveDMsPage", rpcParams(MessageQuery{ServerID: serverID, Limit: 10}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,13 +149,21 @@ func TestDurabilityAuthorizationAndThreads(t *testing.T) {
 	}
 	s := &server{db: db, idle: 750000000}
 	a, b, c := testIdentity(t, s, "test-a"), testIdentity(t, s, "test-b"), testIdentity(t, s, "test-c")
+	created, err := s.dispatch(context.Background(), a.ID, "CreateServer", rpcParams(map[string]any{"name": "durable-dm", "join_policy": "public"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverID := created.(v2Server).ID
+	if _, err = s.dispatch(context.Background(), b.ID, "JoinServer", rpcParams(map[string]string{"server_id": serverID})); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = s.dispatch(nil, a.ID, "ConnectTo", rpcParams(map[string]string{"identity_id": b.ID})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.dispatch(nil, a.ID, "SendDM", rpcParams(map[string]string{"to": b.ID, "content": "private"})); err != nil {
+	if _, err = s.dispatch(nil, a.ID, "SendDM", rpcParams(map[string]string{"server_id": serverID, "to": b.ID, "content": "private"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.dispatch(nil, c.ID, "GetDMHistory", rpcParams(map[string]string{"with": b.ID})); err == nil {
+	if _, err = s.dispatch(nil, c.ID, "GetDMHistory", rpcParams(map[string]string{"server_id": serverID, "with": b.ID})); err == nil {
 		t.Fatal("unauthorized DM read succeeded")
 	}
 	gAny, err := s.dispatch(nil, a.ID, "CreateGroup", rpcParams(map[string]string{"name": "test-group"}))
@@ -194,7 +210,7 @@ func TestDurabilityAuthorizationAndThreads(t *testing.T) {
 		t.Fatal(err)
 	}
 	sr := &server{db: reloaded, idle: 750000000}
-	h, err := sr.dispatch(nil, b.ID, "GetDMHistory", rpcParams(map[string]string{"with": a.ID}))
+	h, err := sr.dispatch(nil, b.ID, "GetDMHistory", rpcParams(map[string]string{"server_id": serverID, "with": a.ID}))
 	if err != nil {
 		t.Fatal(err)
 	}
