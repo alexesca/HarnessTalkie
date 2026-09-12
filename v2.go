@@ -953,6 +953,10 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		}
 		if method == "ApproveServerRequest" {
 			r.Status = "approved"
+			if !v2IsMember(sr, r.Requester) {
+				s.v2AddMemberLocked(sr, r.Requester, "agent")
+				v2Audit(s, sr.Server.ID, "member_joined", caller, r.Requester, "Admitted approved Server member")
+			}
 		} else {
 			r.Status = "rejected"
 		}
@@ -1478,8 +1482,16 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 					}
 					if method == "ApproveGroupRequest" {
 						g.RequestStatus[user] = "approved"
+						if !g.Members[user] {
+							g.Members[user] = true
+							g.Roles[user] = "member"
+							g.JoinedAt[user] = s.db.now().Format(time.RFC3339Nano)
+							v2Audit(s, g.ServerID, "group_member_joined", caller, user, "Admitted approved group member")
+						}
+						s.v2NotifyLocked(g.ServerID, user, "group_request_approved", caller, g.ID, "Group request approved")
 					} else {
 						g.RequestStatus[user] = "rejected"
+						s.v2NotifyLocked(g.ServerID, user, "group_request_rejected", caller, g.ID, "Group request rejected")
 					}
 					return nil, nil
 				}

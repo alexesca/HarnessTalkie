@@ -110,3 +110,25 @@ func TestV2PostVisibilityIsEnforcedAcrossReadSurfaces(t *testing.T) {
 		t.Fatal("unshared participant read a directly-shared post")
 	}
 }
+
+func TestV2ApprovalImmediatelyAdmitsServerAndGroupMembers(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	owner := testIdentity(t, s, "approval-owner")
+	applicant := testIdentity(t, s, "approval-applicant")
+	serverValue := v2DispatchForTest(t, s, owner.ID, "CreateServer", map[string]any{"name": "Approval workspace", "join_policy": "approval-required"}).(v2Server)
+	request := v2DispatchForTest(t, s, applicant.ID, "RequestServerAccess", map[string]string{"server_id": serverValue.ID}).(v2ServerRequest)
+	v2DispatchForTest(t, s, owner.ID, "ApproveServerRequest", map[string]string{"request_id": request.ID})
+	member := v2DispatchForTest(t, s, owner.ID, "GetServerMember", map[string]string{"server_id": serverValue.ID, "participant_id": applicant.ID}).(v2MemberView)
+	if member.IdentityID != applicant.ID {
+		t.Fatalf("approved Server member = %#v", member)
+	}
+
+	group := v2DispatchForTest(t, s, owner.ID, "CreateGroup", map[string]any{"server_id": serverValue.ID, "name": "Approval group", "join_policy": "approval-required"}).(Group)
+	groupRequest := v2DispatchForTest(t, s, applicant.ID, "RequestGroupAccess", map[string]string{"group_id": group.ID}).(v2GroupRequestView)
+	v2DispatchForTest(t, s, owner.ID, "ApproveGroupRequest", map[string]string{"request_id": groupRequest.ID})
+	v2DispatchForTest(t, s, applicant.ID, "GetGroupHistory", map[string]string{"group": group.ID})
+}

@@ -1,8 +1,8 @@
-import { useState, type FormEvent } from 'react'
+import { Suspense, useState, type FormEvent } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useSession } from '../session'
 import { messageForError } from '../lib/rpc'
-import { Avatar } from './ui'
+import { Avatar, Loading } from './ui'
 
 const nav = [
   ['Overview', '/', 'nav-overview'], ['Inbox', '/inbox', 'nav-inbox'], ['Servers', '/servers', 'nav-servers'],
@@ -31,9 +31,9 @@ export function AppShell() {
       <div className="sidebar-account">{identity ? <><Avatar name={identity.display_name}/><div><strong>{identity.display_name}</strong><small>Secure session</small></div><button className="icon-button" onClick={disconnect} aria-label="Disconnect identity">↪</button></> : <><span className="avatar muted">?</span><div><strong>Not connected</strong><small>Start with a name</small></div></>}</div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><button className="menu-button" onClick={() => setOpen(true)} aria-label="Open navigation">☰</button><div className="connection"><i className={identity ? 'connected' : ''}/>{identity ? 'Connected' : 'Local workspace'}</div><form className="identity-form" onSubmit={submit}><label className="sr-only" htmlFor="identity-name">Identity name</label><input id="identity-name" data-testid="identity-id" value={name} onChange={event => setName(event.target.value)} placeholder="Your name or handle" autoComplete="username"/><button data-testid="identity-load" disabled={busy}>{busy ? 'Connecting…' : identity ? 'Reconnect' : 'Connect'}</button></form></header>
+      <header className="topbar"><button className="menu-button" onClick={() => setOpen(true)} aria-label="Open navigation">☰</button><div className="connection" data-testid="identity-status"><i className={identity ? 'connected' : ''}/>{identity ? 'Connected' : 'Local workspace'}</div><form className="identity-form" onSubmit={submit}><label className="sr-only" htmlFor="identity-name">Identity name</label><input id="identity-name" data-testid="identity-id" value={name} onChange={event => setName(event.target.value)} placeholder="Your name or handle" autoComplete="username"/><button data-testid="identity-load" disabled={busy}>{busy ? 'Connecting…' : identity ? 'Reconnect' : 'Connect'}</button></form></header>
       {error && <div className="top-error" role="alert">{error}</div>}
-      <main id="main-content"><Outlet/></main>
+      <main id="main-content"><Suspense fallback={<div className="route-loading"><h1 className="sr-only">Loading HarnessTalkie</h1><Loading/></div>}><Outlet/></Suspense></main>
     </div>
   </div>
 }
