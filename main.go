@@ -1278,13 +1278,22 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if s.db.s.Identities[req.To] == nil {
 			return nil, missing("recipient not found")
 		}
+		if req.ServerID != "" {
+			sr := s.db.s.Servers[req.ServerID]
+			if sr == nil || !v2IsMember(sr, caller) || !v2IsMember(sr, req.To) {
+				return nil, denied("both participants must belong to the scoped Server")
+			}
+			if !v2Can(sr, caller, "send_messages") {
+				return nil, denied("send_messages permission required")
+			}
+		}
 		if req.ClientMessageID != "" {
 			if m := s.db.s.DMByClientID[caller+"\x00"+req.ClientMessageID]; m != nil {
 				return *m, nil
 			}
 		}
 		conversation := conversationID(caller, req.To)
-		m := &Message{ID: s.db.nextID("msg"), SenderID: caller, RecipientID: req.To, Content: req.Content, Sequence: s.db.s.Next, CreatedAt: s.db.now(), ConversationID: conversation, ReplyTo: req.ReplyTo, ClientMessageID: req.ClientMessageID}
+		m := &Message{ID: s.db.nextID("msg"), ServerID: req.ServerID, SenderID: caller, RecipientID: req.To, Content: req.Content, Sequence: s.db.s.Next, CreatedAt: s.db.now(), ConversationID: conversation, ReplyTo: req.ReplyTo, ClientMessageID: req.ClientMessageID}
 		if err := s.db.commit("dm", m, func() {
 			s.db.s.DMs = append(s.db.s.DMs, m)
 			if m.ClientMessageID != "" {
@@ -1292,6 +1301,10 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			}
 			s.db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: m})
 		}); err != nil {
+			return nil, err
+		}
+		s.v2NotifyLocked(req.ServerID, req.To, "dm", caller, m.ID, "New direct message")
+		if err := s.v2PersistStateLocked(); err != nil {
 			return nil, err
 		}
 		return *m, nil
@@ -1592,7 +1605,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		}
 		return out, nil
 	default:
-		if strings.HasPrefix(method, "CreateServer") || strings.HasPrefix(method, "GetServer") || strings.HasPrefix(method, "UpdateServer") || strings.HasPrefix(method, "ListServer") || strings.HasPrefix(method, "DiscoverServer") || strings.HasPrefix(method, "JoinServer") || strings.HasPrefix(method, "RequestServer") || strings.HasPrefix(method, "ApproveServer") || strings.HasPrefix(method, "RejectServer") || strings.HasPrefix(method, "InviteToServer") || strings.HasPrefix(method, "AcceptServer") || strings.HasPrefix(method, "LeaveServer") || strings.HasPrefix(method, "RemoveServer") || strings.HasPrefix(method, "FindServer") || strings.HasPrefix(method, "SetServer") || strings.HasPrefix(method, "CreateGroup") || strings.HasPrefix(method, "UpdateGroup") || strings.HasPrefix(method, "DeleteGroup") || strings.HasPrefix(method, "DiscoverGroup") || strings.HasPrefix(method, "JoinGroup") || strings.HasPrefix(method, "RequestGroup") || strings.HasPrefix(method, "ApproveGroup") || strings.HasPrefix(method, "RejectGroup") || strings.HasPrefix(method, "InviteToGroup") || strings.HasPrefix(method, "AcceptGroup") || strings.HasPrefix(method, "LeaveGroup") || strings.HasPrefix(method, "RemoveGroup") || strings.HasPrefix(method, "ListGroup") || strings.HasPrefix(method, "CreatePost") || strings.HasPrefix(method, "EditPost") || strings.HasPrefix(method, "DiscoverPost") || strings.HasPrefix(method, "SearchPost") || strings.HasPrefix(method, "GetThread") || strings.HasPrefix(method, "CommentServer") || strings.HasPrefix(method, "SharePost") || strings.HasPrefix(method, "ListNotification") || strings.HasPrefix(method, "MarkNotification") || method == "Comment" || method == "ApplyManifest" || method == "Batch" || method == "Sync" {
+		if strings.HasPrefix(method, "CreateServer") || strings.HasPrefix(method, "GetServer") || strings.HasPrefix(method, "UpdateServer") || strings.HasPrefix(method, "ListServer") || strings.HasPrefix(method, "DiscoverServer") || strings.HasPrefix(method, "JoinServer") || strings.HasPrefix(method, "RequestServer") || strings.HasPrefix(method, "ApproveServer") || strings.HasPrefix(method, "RejectServer") || strings.HasPrefix(method, "InviteToServer") || strings.HasPrefix(method, "AcceptServer") || strings.HasPrefix(method, "LeaveServer") || strings.HasPrefix(method, "RemoveServer") || strings.HasPrefix(method, "FindServer") || strings.HasPrefix(method, "SetServer") || strings.HasPrefix(method, "CreateGroup") || strings.HasPrefix(method, "UpdateGroup") || strings.HasPrefix(method, "DeleteGroup") || strings.HasPrefix(method, "DiscoverGroup") || strings.HasPrefix(method, "JoinGroup") || strings.HasPrefix(method, "RequestGroup") || strings.HasPrefix(method, "ApproveGroup") || strings.HasPrefix(method, "RejectGroup") || strings.HasPrefix(method, "InviteToGroup") || strings.HasPrefix(method, "AcceptGroup") || strings.HasPrefix(method, "LeaveGroup") || strings.HasPrefix(method, "RemoveGroup") || strings.HasPrefix(method, "ListGroup") || strings.HasPrefix(method, "SetGroup") || strings.HasPrefix(method, "CreatePost") || strings.HasPrefix(method, "EditPost") || strings.HasPrefix(method, "DiscoverPost") || strings.HasPrefix(method, "SearchPost") || strings.HasPrefix(method, "GetThread") || strings.HasPrefix(method, "CommentServer") || strings.HasPrefix(method, "SharePost") || strings.HasPrefix(method, "ListNotification") || strings.HasPrefix(method, "MarkNotification") || method == "Comment" || method == "ApplyManifest" || method == "Batch" || method == "Sync" {
 			return s.v2DispatchLocked(ctx, caller, method, raw)
 		}
 		if method == "DiscoverProtocol" || method == "GetSchema" || method == "GetHelp" || method == "ListPresets" || method == "ApplyPreset" || method == "ListTransports" {
