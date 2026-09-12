@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -758,12 +759,16 @@ func secureWireJSON(raw any, token string, encrypt bool) (json.RawMessage, error
 	var value any
 	var err error
 	if b, ok := raw.(json.RawMessage); ok {
-		err = json.Unmarshal(b, &value)
+		decoder := json.NewDecoder(bytes.NewReader(b))
+		decoder.UseNumber()
+		err = decoder.Decode(&value)
 	} else {
 		b, marshalErr := json.Marshal(raw)
 		err = marshalErr
 		if err == nil {
-			err = json.Unmarshal(b, &value)
+			decoder := json.NewDecoder(bytes.NewReader(b))
+			decoder.UseNumber()
+			err = decoder.Decode(&value)
 		}
 	}
 	if err != nil {
