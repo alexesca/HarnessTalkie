@@ -27,6 +27,7 @@ test.describe('human collaboration application', () => {
     const identityName = `Playwright human ${suffix}`
     const serverName = `Playwright workspace ${suffix}`
     const groupName = `Review room ${suffix}`
+    const peerName = `Playwright agent ${suffix}`
 
     const identity = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: identityName })
     const server = await rpc<Server>(request, 'CreateServer', {
@@ -37,6 +38,8 @@ test.describe('human collaboration application', () => {
       discoverable: true,
       tags: ['e2e'],
     }, identity.session_token)
+    const peer = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: peerName })
+    await rpc(request, 'JoinServer', { server_id: server.id }, peer.session_token)
 
     await page.goto('/')
     await expect(page.getByRole('heading', { name: /Collaboration without the ceremony/i })).toBeVisible()
@@ -56,6 +59,13 @@ test.describe('human collaboration application', () => {
     await expect(page.getByRole('heading', { name: 'Members & agents', exact: true })).toBeVisible()
     await expect(page.getByTestId('server-members-visible')).toBeVisible()
     await expect(page.getByTestId('server-members-visible').getByRole('heading', { name: identityName, exact: true })).toBeVisible()
+    await expect(page.getByTestId('server-members-visible').getByRole('heading', { name: peerName, exact: true })).toBeVisible()
+
+    await page.goto(`/dm/${peer.id}`)
+    await expect(page.getByRole('heading', { name: peerName, exact: true })).toBeVisible()
+    await page.getByTestId('dm-content').fill('Hello from the real Playwright workflow')
+    await page.getByTestId('dm-send').click()
+    await expect(page.getByTestId('dm-messages')).toContainText('Hello from the real Playwright workflow')
 
     await page.getByRole('link', { name: 'Groups', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Groups', exact: true })).toBeVisible()
@@ -63,6 +73,25 @@ test.describe('human collaboration application', () => {
     await page.getByRole('button', { name: 'Create', exact: true }).click()
     await expect(page.getByRole('status')).toContainText(`Created ${groupName}`)
     await expect(page.getByRole('button', { name: new RegExp(`# ${groupName}`) })).toBeVisible()
+    await page.getByTestId('group-message').fill('Playwright group collaboration')
+    await page.getByTestId('group-send').click()
+    await expect(page.getByTestId('group-messages')).toContainText('Playwright group collaboration')
+
+    const postTitle = `Playwright decision ${suffix}`
+    await page.getByRole('link', { name: 'Forums', exact: true }).click()
+    await page.getByTestId('post-title').fill(postTitle)
+    await page.getByTestId('post-content').fill('A real forum workflow with a durable reply')
+    await page.getByTestId('post-create').click()
+    const postLink = page.getByRole('link').filter({ hasText: postTitle })
+    await expect(postLink).toBeVisible()
+    await postLink.click()
+    await page.getByTestId('comment-content').fill('Playwright nested discussion reply')
+    await page.getByTestId('comment-send').click()
+    await expect(page.getByTestId('comments')).toContainText('Playwright nested discussion reply')
+    await page.getByTestId('thread-follow').click()
+    await expect(page.getByRole('status')).toContainText('Following this discussion')
+    await page.getByTestId('react').click()
+    await expect(page.getByRole('status')).toContainText('Reaction added')
 
     // The routed Server URL is a bookmarkable deep link. Refreshing it must
     // reuse the session and active-server context rather than showing setup.

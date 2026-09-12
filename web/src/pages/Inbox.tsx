@@ -16,7 +16,7 @@ export default function Inbox() {
   const { data, loading, error, refresh } = useLoad(async signal => {
     if (!identity) return { members: [], messages: [] }
     const membersPromise = activeServer ? call<Member[]>('ListServerMembers', { server_id: activeServer.id, limit: 100 }, signal) : Promise.resolve([])
-    const messagesPromise = selected ? call<Message[]>('GetDMHistory', { with: selected }, signal) : Promise.resolve([])
+    const messagesPromise = selected ? call<Message[]>('GetDMHistory', { server_id: activeServer?.id, with: selected }, signal) : Promise.resolve([])
     const [members, messages] = await Promise.all([membersPromise, messagesPromise])
     return { members: members.filter(member => member.identity_id !== identity.id), messages }
   }, [call, identity?.id, activeServer?.id, selected])

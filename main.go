@@ -99,6 +99,7 @@ type SendDMRequest struct {
 }
 type MessageQuery struct {
 	With          string `json:"with,omitempty"`
+	ServerID      string `json:"server_id,omitempty"`
 	AfterSequence uint64 `json:"after_sequence,omitempty"`
 	Limit         int    `json:"limit,omitempty"`
 	UnreadOnly    bool   `json:"unread_only,omitempty"`
@@ -1325,7 +1326,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if with == "" || s.db.s.Identities[with] == nil {
 			return nil, missing("participant not found")
 		}
-		if with != caller && !s.db.s.Identities[caller].Contacts[with] && !hasDM(s.db.s.DMs, caller, with) {
+		sameServer := false
+		if serverID := arg("server_id"); serverID != "" {
+			sr := s.db.s.Servers[serverID]
+			sameServer = sr != nil && v2IsMember(sr, caller) && v2IsMember(sr, with)
+		}
+		if with != caller && !sameServer && !s.db.s.Identities[caller].Contacts[with] && !hasDM(s.db.s.DMs, caller, with) {
 			return nil, denied("DM history is private")
 		}
 		out := []Message{}
@@ -1343,7 +1349,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		if q.With == "" || s.db.s.Identities[q.With] == nil {
 			return nil, missing("participant not found")
 		}
-		if q.With != caller && !s.db.s.Identities[caller].Contacts[q.With] && !hasDM(s.db.s.DMs, caller, q.With) {
+		sameServer := false
+		if q.ServerID != "" {
+			sr := s.db.s.Servers[q.ServerID]
+			sameServer = sr != nil && v2IsMember(sr, caller) && v2IsMember(sr, q.With)
+		}
+		if q.With != caller && !sameServer && !s.db.s.Identities[caller].Contacts[q.With] && !hasDM(s.db.s.DMs, caller, q.With) {
 			return nil, denied("DM history is private")
 		}
 		out := []Message{}

@@ -37,6 +37,26 @@ func TestV2ServerScopedDMDeniesOutsiderAndNotifiesMember(t *testing.T) {
 	}
 }
 
+func TestV2ServerMembersCanOpenAnEmptyScopedConversation(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	owner := testIdentity(t, s, "empty-dm-owner")
+	member := testIdentity(t, s, "empty-dm-member")
+	outsider := testIdentity(t, s, "empty-dm-outsider")
+	serverValue := v2DispatchForTest(t, s, owner.ID, "CreateServer", map[string]any{"name": "DM workspace", "join_policy": "public"}).(v2Server)
+	v2DispatchForTest(t, s, member.ID, "JoinServer", map[string]string{"server_id": serverValue.ID})
+	history := v2DispatchForTest(t, s, owner.ID, "GetDMHistory", map[string]string{"server_id": serverValue.ID, "with": member.ID}).([]Message)
+	if len(history) != 0 {
+		t.Fatalf("empty DM history = %#v", history)
+	}
+	if _, err = s.dispatch(context.Background(), outsider.ID, "GetDMHistory", rpcParams(map[string]string{"server_id": serverValue.ID, "with": member.ID})); err == nil {
+		t.Fatal("outsider opened a Server-scoped DM history")
+	}
+}
+
 func TestV2FutureCursorAndStateSurviveRestart(t *testing.T) {
 	path := t.TempDir() + "/events"
 	db, err := newStore(path)
