@@ -84,6 +84,7 @@ type v2PostRecord struct {
 	GroupID    string   `json:"group_id,omitempty"`
 	Visibility string   `json:"visibility"`
 	Mentions   []string `json:"mentions,omitempty"`
+	SharedWith []string `json:"shared_with,omitempty"`
 }
 type v2Notification struct {
 	ID        string `json:"id"`
@@ -130,6 +131,7 @@ type v2PostView struct {
 	GroupID    string   `json:"group_id,omitempty"`
 	Visibility string   `json:"visibility"`
 	Mentions   []string `json:"mentions,omitempty"`
+	SharedWith []string `json:"shared_with,omitempty"`
 }
 type v2ManifestResult struct {
 	Identity       Identity         `json:"identity"`
@@ -238,7 +240,62 @@ func v2GroupView(g *v2GroupRecord) Group {
 	return Group{ID: g.ID, ServerID: g.ServerID, Name: g.Name, Description: g.Description, OwnerID: g.OwnerID, JoinPolicy: g.JoinPolicy, Private: g.Private, MemberCount: len(ids), Members: ids}
 }
 func v2PostViewOf(p *v2PostRecord) v2PostView {
-	return v2PostView{Post: p.Post, ServerID: p.ServerID, GroupID: p.GroupID, Visibility: p.Visibility, Mentions: append([]string(nil), p.Mentions...)}
+	return v2PostView{Post: p.Post, ServerID: p.ServerID, GroupID: p.GroupID, Visibility: p.Visibility, Mentions: append([]string(nil), p.Mentions...), SharedWith: append([]string(nil), p.SharedWith...)}
+}
+
+func (s *server) v2CanViewPostLocked(p *v2PostRecord, caller string) bool {
+	sr := s.db.s.Servers[p.ServerID]
+	if sr == nil || !v2IsMember(sr, caller) {
+		return false
+	}
+	if p.GroupID != "" {
+		g := s.db.s.V2Groups[p.GroupID]
+		if g == nil || !g.Members[caller] {
+			return false
+		}
+	}
+	switch p.Visibility {
+	case "private":
+		return p.Post.AuthorID == caller
+	case "directly-shared":
+		if p.Post.AuthorID == caller || v2Contains(p.SharedWith, caller) || v2Contains(p.SharedWith, p.ServerID) {
+			return true
+		}
+		for _, target := range p.SharedWith {
+			if group := s.db.s.V2Groups[target]; group != nil && group.ServerID == p.ServerID && group.Members[caller] {
+				return true
+			}
+		}
+		return false
+	case "group-only":
+		return p.GroupID != ""
+	default:
+		return true
+	}
+}
+
+func (s *server) v2RevokeServerAccessLocked(serverID, participant string) {
+	for _, group := range s.db.s.V2Groups {
+		if group.ServerID != serverID {
+			continue
+		}
+		delete(group.Members, participant)
+		delete(group.Roles, participant)
+		delete(group.JoinedAt, participant)
+		delete(group.Invites, participant)
+		delete(group.InviteBy, participant)
+		delete(group.InviteAt, participant)
+		delete(group.InviteExpiry, participant)
+		delete(group.Requests, participant)
+		delete(group.RequestStatus, participant)
+		delete(group.RequestReason, participant)
+		delete(group.RequestAt, participant)
+	}
+	for postID, post := range s.db.s.V2Posts {
+		if post.ServerID == serverID {
+			delete(s.db.s.Followers[postID], participant)
+		}
+	}
 }
 
 func v2Contains(xs []string, x string) bool {
@@ -649,7 +706,7 @@ func (s *server) v2PersistLocked(typ string, value any) error { return s.db.appe
 func v2MutatingMethod(method string) bool {
 	switch method {
 	case "CreateServer", "UpdateServer", "JoinServer", "RequestServerAccess", "ApproveServerRequest", "RejectServerRequest", "InviteToServer", "AcceptServerInvite", "LeaveServer", "RemoveServerMember", "SetServerRole", "UpdateServerPermissions",
-		"CreateGroup", "SendGroupMessageV2Bridge", "ReactV2Bridge", "UpdateGroup", "DeleteGroup", "JoinGroup", "RequestGroupAccess", "ApproveGroupRequest", "RejectGroupRequest", "InviteToGroup", "AcceptGroupInvite", "LeaveGroup", "RemoveGroupMember", "SetGroupRole", "UpdateGroupPermissions",
+		"CreateGroup", "SendGroupMessageV2Bridge", "ReactV2Bridge", "FollowV2Bridge", "UnfollowV2Bridge", "UpdateGroup", "DeleteGroup", "JoinGroup", "RequestGroupAccess", "ApproveGroupRequest", "RejectGroupRequest", "InviteToGroup", "AcceptGroupInvite", "LeaveGroup", "RemoveGroupMember", "SetGroupRole", "UpdateGroupPermissions",
 		"CreatePost", "EditPost", "Comment", "SharePost", "MarkNotificationsRead", "ApplyManifest":
 		return true
 	}
@@ -723,7 +780,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if e != nil {
 			return nil, e
 		}
-		if !v2IsMember(sr, caller) && (!sr.Server.Discoverable || sr.Server.JoinPolicy != "public") {
+		if !v2IsMember(sr, caller) && !sr.Server.Discoverable {
 			return nil, denied("Server metadata is private")
 		}
 		return v2ApplySelection(v2ServerView(sr), v2Options(m)), nil
@@ -979,6 +1036,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			return nil, denied("Server membership required")
 		}
 		delete(sr.Members, caller)
+		s.v2RevokeServerAccessLocked(sr.Server.ID, caller)
 		if e := s.v2PersistLocked("v2_member_remove", map[string]string{"server_id": sr.Server.ID, "participant": caller}); e != nil {
 			return nil, e
 		}
@@ -995,6 +1053,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			return nil, denied("remove_members permission required")
 		}
 		delete(sr.Members, target)
+		s.v2RevokeServerAccessLocked(sr.Server.ID, target)
 		if e := s.v2PersistLocked("v2_member_remove", map[string]string{"server_id": sr.Server.ID, "participant": target}); e != nil {
 			return nil, e
 		}
@@ -1238,8 +1297,12 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if p == nil {
 			return nil, missing("reaction target not found")
 		}
-		if _, e := memberServer(p.ServerID); e != nil {
+		_, e := memberServer(p.ServerID)
+		if e != nil {
 			return nil, e
+		}
+		if !s.v2CanViewPostLocked(p, caller) {
+			return nil, denied("post visibility does not permit access")
 		}
 		if s.db.s.Reactions[p.Post.ID] == nil {
 			s.db.s.Reactions[p.Post.ID] = map[string]int{}
@@ -1249,6 +1312,24 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			s.v2NotifyLocked(p.ServerID, p.Post.AuthorID, "reaction", caller, p.Post.ID, "Reaction to your post")
 		}
 		v2Audit(s, p.ServerID, "reaction", caller, p.Post.ID, "Reaction")
+		return nil, nil
+	case "FollowV2Bridge", "UnfollowV2Bridge":
+		postID := arg("post")
+		p := s.db.s.V2Posts[postID]
+		if p == nil {
+			return nil, missing("post not found")
+		}
+		if !s.v2CanViewPostLocked(p, caller) {
+			return nil, denied("post visibility does not permit access")
+		}
+		if s.db.s.Followers[postID] == nil {
+			s.db.s.Followers[postID] = map[string]bool{}
+		}
+		if method == "FollowV2Bridge" {
+			s.db.s.Followers[postID][caller] = true
+		} else {
+			delete(s.db.s.Followers[postID], caller)
+		}
 		return nil, nil
 	case "UpdateGroup":
 		g := s.db.s.V2Groups[arg("group_id")]
@@ -1612,6 +1693,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			Content    string   `json:"content"`
 			Visibility string   `json:"visibility"`
 			Mentions   []string `json:"mentions"`
+			SharedWith []string `json:"shared_with"`
 		}
 		if e := v2Map(raw, &p); e != nil {
 			return nil, e
@@ -1632,8 +1714,29 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if p.Visibility == "" {
 			p.Visibility = "server-wide"
 		}
+		validVisibility := map[string]bool{"server-wide": true, "group-only": true, "directly-shared": true, "private": true}
+		if !validVisibility[p.Visibility] {
+			return nil, bad("invalid post visibility")
+		}
+		if p.Visibility == "group-only" && p.GroupID == "" {
+			return nil, bad("group-only posts require a group")
+		}
+		if p.Visibility == "directly-shared" && len(p.SharedWith) == 0 {
+			return nil, bad("directly-shared posts require a share target")
+		}
+		for _, target := range append(append([]string(nil), p.Mentions...), p.SharedWith...) {
+			if target == p.ServerID {
+				continue
+			}
+			if group := s.db.s.V2Groups[target]; group != nil && group.ServerID == p.ServerID {
+				continue
+			}
+			if !v2IsMember(sr, target) {
+				return nil, bad("post target is not a Server member")
+			}
+		}
 		id := s.db.nextID("post")
-		post := &v2PostRecord{Post: Post{ID: id, AuthorID: caller, Title: p.Title, Content: p.Content, CreatedAt: s.db.now()}, ServerID: p.ServerID, GroupID: p.GroupID, Visibility: p.Visibility, Mentions: p.Mentions}
+		post := &v2PostRecord{Post: Post{ID: id, AuthorID: caller, Title: p.Title, Content: p.Content, CreatedAt: s.db.now()}, ServerID: p.ServerID, GroupID: p.GroupID, Visibility: p.Visibility, Mentions: p.Mentions, SharedWith: p.SharedWith}
 		if e = commit("v2_post", post, func() {
 			s.db.s.V2Posts[id] = post
 			s.db.s.Posts[id] = &post.Post
@@ -1642,7 +1745,9 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			return nil, e
 		}
 		for _, u := range p.Mentions {
-			s.v2NotifyLocked(p.ServerID, u, "mention", caller, id, "You were mentioned")
+			if s.v2CanViewPostLocked(post, u) {
+				s.v2NotifyLocked(p.ServerID, u, "mention", caller, id, "You were mentioned")
+			}
 		}
 		return v2PostViewOf(post), nil
 	case "EditPost":
@@ -1670,6 +1775,10 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			p.Post.Content = *x.Content
 		}
 		if x.Visibility != nil {
+			validVisibility := map[string]bool{"server-wide": true, "group-only": true, "directly-shared": true, "private": true}
+			if !validVisibility[*x.Visibility] || (*x.Visibility == "group-only" && p.GroupID == "") || (*x.Visibility == "directly-shared" && len(p.SharedWith) == 0) {
+				return nil, bad("invalid post visibility")
+			}
 			p.Visibility = *x.Visibility
 		}
 		return v2PostViewOf(p), nil
@@ -1692,11 +1801,8 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			if p.ServerID != q.ServerID {
 				continue
 			}
-			if p.GroupID != "" {
-				g := s.db.s.V2Groups[p.GroupID]
-				if g == nil || !g.Members[caller] {
-					continue
-				}
+			if !s.v2CanViewPostLocked(p, caller) {
+				continue
 			}
 			if q.GroupID != "" && p.GroupID != q.GroupID {
 				continue
@@ -1724,11 +1830,12 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if p == nil {
 			return nil, missing("post not found")
 		}
-		if _, e := memberServer(p.ServerID); e != nil {
+		_, e := memberServer(p.ServerID)
+		if e != nil {
 			return nil, e
 		}
-		if p.GroupID != "" && !s.db.s.V2Groups[p.GroupID].Members[caller] {
-			return nil, denied("group membership required")
+		if !s.v2CanViewPostLocked(p, caller) {
+			return nil, denied("post visibility does not permit access")
 		}
 		return s.threadLocked(p.Post.ID), nil
 	case "Comment":
@@ -1744,8 +1851,8 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if _, e := memberServer(p.ServerID); e != nil {
 			return nil, e
 		}
-		if p.GroupID != "" && !s.db.s.V2Groups[p.GroupID].Members[caller] {
-			return nil, denied("group membership required")
+		if !s.v2CanViewPostLocked(p, caller) {
+			return nil, denied("post visibility does not permit access")
 		}
 		content := arg("content")
 		c := &CommentNode{ID: s.db.nextID("comment"), AuthorID: caller, Content: content, CreatedAt: s.db.now()}
@@ -1760,10 +1867,14 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		}
 		v2Audit(s, p.ServerID, "comment", caller, postID, "Thread reply")
 		for _, u := range v2Strings(m, "mentions") {
-			s.v2NotifyLocked(p.ServerID, u, "mention", caller, postID, "You were mentioned")
+			if s.v2CanViewPostLocked(p, u) {
+				s.v2NotifyLocked(p.ServerID, u, "mention", caller, postID, "You were mentioned")
+			}
 		}
 		for u := range s.db.s.Followers[postID] {
-			s.v2NotifyLocked(p.ServerID, u, "reply", caller, postID, "Followed thread activity")
+			if s.v2CanViewPostLocked(p, u) {
+				s.v2NotifyLocked(p.ServerID, u, "reply", caller, postID, "Followed thread activity")
+			}
 		}
 		return *c, nil
 	case "SharePost":
@@ -1771,8 +1882,33 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		if p == nil {
 			return nil, missing("post not found")
 		}
-		if _, e := memberServer(p.ServerID); e != nil {
+		sr, e := memberServer(p.ServerID)
+		if e != nil {
 			return nil, e
+		}
+		if !s.v2CanViewPostLocked(p, caller) {
+			return nil, denied("post visibility does not permit access")
+		}
+		if p.Post.AuthorID != caller && !v2Can(sr, caller, "moderate_posts") {
+			return nil, denied("post sharing permission required")
+		}
+		serverTarget, groupTarget, participantTarget := arg("server_id"), arg("group_id"), arg("participant_id")
+		if serverTarget != "" && serverTarget != p.ServerID {
+			return nil, bad("post cannot be shared across Servers")
+		}
+		if groupTarget != "" {
+			group := s.db.s.V2Groups[groupTarget]
+			if group == nil || group.ServerID != p.ServerID {
+				return nil, bad("share target is not a group in this Server")
+			}
+		}
+		if participantTarget != "" && !v2IsMember(s.db.s.Servers[p.ServerID], participantTarget) {
+			return nil, bad("share target is not a Server member")
+		}
+		for _, target := range []string{serverTarget, groupTarget, participantTarget} {
+			if target != "" && !v2Contains(p.SharedWith, target) {
+				p.SharedWith = append(p.SharedWith, target)
+			}
 		}
 		return nil, nil
 	case "ListNotifications":
@@ -1938,7 +2074,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			if post == nil || post.ServerID != sr.Server.ID {
 				continue
 			}
-			if post.GroupID != "" && !s.db.s.V2Groups[post.GroupID].Members[caller] {
+			if !s.v2CanViewPostLocked(post, caller) {
 				continue
 			}
 			if s.db.s.Followers[postID] == nil {
@@ -2087,7 +2223,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 			for id, comment := range s.db.s.Comments {
 				postID := s.db.s.CommentPosts[id]
 				post := s.db.s.V2Posts[postID]
-				if post != nil && post.ServerID == sr.Server.ID && sequenceFromID(id) > q.AfterCursor {
+				if post != nil && post.ServerID == sr.Server.ID && s.v2CanViewPostLocked(post, caller) && sequenceFromID(id) > q.AfterCursor {
 					comments = append(comments, *comment)
 				}
 			}
@@ -2115,7 +2251,7 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		}
 		if all || include["posts"] {
 			for _, post := range s.db.s.V2Posts {
-				if post.ServerID == sr.Server.ID && (post.GroupID == "" || s.db.s.V2Groups[post.GroupID].Members[caller]) {
+				if post.ServerID == sr.Server.ID && s.v2CanViewPostLocked(post, caller) {
 					posts = append(posts, v2PostViewOf(post))
 				}
 			}

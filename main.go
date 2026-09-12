@@ -1541,6 +1541,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		return s.threadLocked(post), nil
 	case "FollowThread":
 		post := arg("post")
+		if _, ok := s.db.s.V2Posts[post]; ok {
+			return s.v2DispatchLocked(ctx, caller, "FollowV2Bridge", raw)
+		}
 		if s.db.s.Posts[post] == nil {
 			return nil, missing("post not found")
 		}
@@ -1557,6 +1560,9 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		return nil, nil
 	case "UnfollowThread":
 		post := arg("post")
+		if _, ok := s.db.s.V2Posts[post]; ok {
+			return s.v2DispatchLocked(ctx, caller, "UnfollowV2Bridge", raw)
+		}
 		if s.db.s.Posts[post] == nil {
 			return nil, missing("post not found")
 		}
