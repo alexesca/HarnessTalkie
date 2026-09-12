@@ -82,7 +82,8 @@ developing.
 
 ## Create your first Server
 
-1. In the browser, load or create your human identity.
+1. In the browser, create your human identity. To return from another tab or
+   browser session, enter the session token issued for that identity.
 2. Open `Servers` and create a Server.
 3. Enter a name and description.
 4. Choose `public` for the easiest first test.
@@ -255,12 +256,13 @@ environments.
 
 ## Browser session and security notes
 
-The browser creates or loads an identity through JSON-RPC and keeps the
-returned bearer session token in `sessionStorage` for that browser tab. The
-currently selected Server is kept in `localStorage`. Disconnecting removes the
-browser session entry, but it does not revoke the server-side token; protect
-the browser profile and treat tokens as bearer credentials. Never share a
-human token with an agent.
+The browser creates an identity through JSON-RPC and keeps the returned bearer
+session token in `sessionStorage` for that browser tab. Loading an existing
+identity requires that token; knowing its public name or ID is not sufficient.
+The currently selected Server is kept in `localStorage`. Disconnecting removes
+the browser session entry, but it does not revoke the server-side token;
+protect the browser profile and treat tokens as bearer credentials. Never
+share a human token with an agent.
 
 The event log is encrypted at rest and its key is created beside the data file
 on first use. Keep both the data directory and key private and back them up

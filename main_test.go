@@ -60,6 +60,29 @@ func testIdentity(t *testing.T, s *server, name string) Identity {
 	return v.(Identity)
 }
 
+func TestExistingIdentityRequiresBearerSession(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	identity := testIdentity(t, s, "protected-identity")
+	if _, err = s.dispatch(context.Background(), "", "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": "protected-identity"})); err == nil {
+		t.Fatal("existing identity token was issued without authentication")
+	}
+	attacker := testIdentity(t, s, "different-identity")
+	if _, err = s.dispatch(context.Background(), attacker.ID, "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": identity.ID})); err == nil {
+		t.Fatal("a different identity's token was accepted for the protected identity")
+	}
+	resumed, err := s.dispatch(context.Background(), identity.ID, "CreateOrLoadIdentity", rpcParams(map[string]string{"identity": identity.ID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.(Identity).SessionToken != identity.SessionToken {
+		t.Fatal("authenticated identity did not resume its session")
+	}
+}
+
 func TestDiscoveryCursorAndIdempotency(t *testing.T) {
 	db, err := newStore("")
 	if err != nil {

@@ -15,8 +15,9 @@ async function rpc<T>(request: APIRequestContext, method: string, params: unknow
   return body.result as T
 }
 
-async function connect(page: Page, name: string) {
+async function connect(page: Page, name: string, token = '') {
   await page.getByLabel('Identity name').fill(name)
+  if (token) await page.getByLabel('Session token for an existing identity').fill(token)
   await page.getByRole('button', { name: 'Connect', exact: true }).click()
   await expect(page.getByTestId('identity-status')).toHaveText('Connected')
 }
@@ -43,7 +44,7 @@ test.describe('human collaboration application', () => {
 
     await page.goto('/')
     await expect(page.getByRole('heading', { name: /Collaboration without the ceremony/i })).toBeVisible()
-    await connect(page, identityName)
+    await connect(page, identityName, identity.session_token)
 
     await page.getByRole('link', { name: 'Servers', exact: true }).click()
     await expect(page).toHaveURL(/\/servers$/)
@@ -122,7 +123,7 @@ test.describe('human collaboration application', () => {
     await rpc(request, 'RequestServerAccess', { server_id: server.id, reason: 'E2E approval' }, agent.session_token)
 
     await page.goto('/')
-    await connect(page, ownerName)
+    await connect(page, ownerName, owner.session_token)
     await page.goto('/settings')
     await page.getByLabel('Open Server administration').fill(server.id)
     await page.getByRole('button', { name: 'Open', exact: true }).click()

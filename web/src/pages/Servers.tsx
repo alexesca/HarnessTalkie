@@ -16,7 +16,7 @@ export default function Servers() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [policy, setPolicy] = useState('public')
-  const { data: servers = [], loading, error, refresh } = useLoad(signal => call<Server[]>('DiscoverServers', { query, limit: 50 }, signal), [call, query])
+  const { data: servers = [], loading, error, refresh } = useLoad(signal => identity ? call<Server[]>('DiscoverServers', { query, limit: 50 }, signal) : Promise.resolve([]), [call, identity, query])
   async function enter(server: Server) {
     setNotice('')
     try {

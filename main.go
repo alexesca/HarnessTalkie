@@ -1137,6 +1137,12 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			}
 		}
 		x := s.db.s.Identities[id]
+		if caller == "" && x != nil {
+			return nil, denied("existing identity requires its session token")
+		}
+		if caller != "" && x != nil && name != x.ID && name != x.Name && name != x.DisplayName {
+			return nil, denied("session token does not match requested identity")
+		}
 		if x == nil {
 			token, err := newToken()
 			if err != nil {

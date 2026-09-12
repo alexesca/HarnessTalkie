@@ -5,7 +5,7 @@ import type { Identity, Server } from './lib/types'
 type Session = {
   identity?: Identity
   activeServer?: Server
-  connect: (name: string) => Promise<Identity>
+  connect: (name: string, token?: string) => Promise<Identity>
   setActiveServer: (server?: Server) => void
   call: <T>(method: string, params?: unknown, signal?: AbortSignal) => Promise<T>
   disconnect: () => void
@@ -22,8 +22,8 @@ const storedServer = () => {
 export function SessionProvider({ children }: PropsWithChildren) {
   const [identity, setIdentity] = useState<Identity | undefined>(() => storedIdentity() || undefined)
   const [activeServer, updateActiveServer] = useState<Server | undefined>(() => storedServer() || undefined)
-  const connect = useCallback(async (name: string) => {
-    const next = await rpc<Identity>('CreateOrLoadIdentity', { identity: name.trim() || 'human' }, identity?.session_token)
+  const connect = useCallback(async (name: string, token = '') => {
+    const next = await rpc<Identity>('CreateOrLoadIdentity', { identity: name.trim() || 'human' }, token.trim() || identity?.session_token)
     sessionStorage.setItem('ht.session.v2', JSON.stringify(next))
     setIdentity(next)
     return next
