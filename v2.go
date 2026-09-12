@@ -2302,6 +2302,47 @@ func rawMapField(m map[string]json.RawMessage, key string) json.RawMessage {
 	return json.RawMessage("{}")
 }
 
+func mergePresetOverrides(base, overrides map[string]any) {
+	for key, override := range overrides {
+		switch value := override.(type) {
+		case nil:
+			continue
+		case string:
+			if value != "" {
+				base[key] = value
+			}
+		case bool:
+			if value {
+				base[key] = value
+			}
+		case float64:
+			if value != 0 {
+				base[key] = value
+			}
+		case json.Number:
+			if value.String() != "0" {
+				base[key] = value
+			}
+		case []any:
+			if len(value) > 0 {
+				base[key] = value
+			}
+		case map[string]any:
+			if len(value) == 0 {
+				continue
+			}
+			target, ok := base[key].(map[string]any)
+			if !ok {
+				target = map[string]any{}
+				base[key] = target
+			}
+			mergePresetOverrides(target, value)
+		default:
+			base[key] = value
+		}
+	}
+}
+
 func isDiscoveryMethod(method string) bool {
 	switch method {
 	case "DiscoverProtocol", "GetSchema", "GetHelp", "ListPresets", "ApplyPreset", "ListTransports":
@@ -2340,9 +2381,7 @@ func v2DiscoveryRequest(method string, raw json.RawMessage) (any, error) {
 			effective["discover"] = map[string]any{"limit": 5}
 			effective["sync"] = map[string]any{"inbox": true, "mentions": true}
 		}
-		for key, value := range p.Overrides {
-			effective[key] = value
-		}
+		mergePresetOverrides(effective, p.Overrides)
 		return map[string]any{"preset": p.Preset, "effective": effective}, nil
 	case "ListTransports":
 		return []map[string]any{{"name": "jsonrpc", "read": true, "write": true, "streaming": false, "authenticated": true, "shared_state": true, "address": "/rpc"}}, nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -131,4 +132,41 @@ func TestV2ApprovalImmediatelyAdmitsServerAndGroupMembers(t *testing.T) {
 	groupRequest := v2DispatchForTest(t, s, applicant.ID, "RequestGroupAccess", map[string]string{"group_id": group.ID}).(v2GroupRequestView)
 	v2DispatchForTest(t, s, owner.ID, "ApproveGroupRequest", map[string]string{"request_id": groupRequest.ID})
 	v2DispatchForTest(t, s, applicant.ID, "GetGroupHistory", map[string]string{"group": group.ID})
+}
+
+func TestV2PresetOverridesPreserveRequiredDefaults(t *testing.T) {
+	result, err := v2DiscoveryRequest("ApplyPreset", rpcParams(map[string]any{
+		"preset": "minimal",
+		"overrides": map[string]any{
+			"apiVersion": "",
+			"kind":       "",
+			"server":     "server-1",
+			"identity":   map[string]any{"name": "preset-agent"},
+			"response":   map[string]any{"mode": "compact"},
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(result)
+	var got struct {
+		Preset    string `json:"preset"`
+		Effective struct {
+			APIVersion string `json:"apiVersion"`
+			Kind       string `json:"kind"`
+			Server     string `json:"server"`
+			Identity   struct {
+				Name string `json:"name"`
+			} `json:"identity"`
+			Response struct {
+				Mode string `json:"mode"`
+			} `json:"response"`
+		} `json:"effective"`
+	}
+	if err = json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Preset != "minimal" || got.Effective.APIVersion != "harnesstalkie/v2" || got.Effective.Kind != "Session" || got.Effective.Server != "server-1" || got.Effective.Identity.Name != "preset-agent" || got.Effective.Response.Mode != "compact" {
+		t.Fatalf("preset result = %#v", got)
+	}
 }
