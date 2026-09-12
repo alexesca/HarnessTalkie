@@ -1014,6 +1014,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if r.URL.Path != "/rpc" {
+		if serveUI(w, r) {
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", 405)

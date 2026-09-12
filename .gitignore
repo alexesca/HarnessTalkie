@@ -21,3 +21,10 @@ walkiebench-scorecard.json
 .idea/
 .vscode/
 *.swp
+
+# Frontend dependency cache (the production Vite build is embedded and tracked)
+web/node_modules/
+web/.vite/
+web/coverage/
+web/*.tsbuildinfo
+web/dist/**/*.map

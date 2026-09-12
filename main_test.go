@@ -29,19 +29,24 @@ func TestSecureWirePreservesUint64(t *testing.T) {
 	}
 }
 
-func TestMessagesViewLoadsAuthorizedEvents(t *testing.T) {
+func TestHumanApplicationAndDeepRoutesAreServed(t *testing.T) {
 	db, err := newStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := &server{db: db, idle: time.Hour}
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, req)
-	body := rec.Body.String()
-	for _, want := range []string{"async function loadMessages", "WaitForEvents", "messages-all", "if(v==='messages'"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("UI is missing %q", want)
+	for _, route := range []string{"/", "/inbox", "/servers/server-1/members", "/posts/post-1"} {
+		req := httptest.NewRequest(http.MethodGet, route, nil)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d", route, rec.Code)
+		}
+		body := rec.Body.String()
+		for _, want := range []string{"<title>HarnessTalkie</title>", `<div id="root"></div>`, `/assets/index-`} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("GET %s missing %q", route, want)
+			}
 		}
 	}
 }
