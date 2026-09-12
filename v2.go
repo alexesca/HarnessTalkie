@@ -5,8 +5,11 @@ package main
 // contract without importing the benchmark module into the application.
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -429,12 +432,29 @@ func (s *server) v2NotifyLocked(serverID, recipient, typ, actor, target, summary
 	s.db.s.V2Notifications[recipient] = append(s.db.s.V2Notifications[recipient], n)
 }
 func (s *server) v2PersistStateLocked() error {
-	return s.db.appendEvent("v2_state", v2DurableState{
+	state := v2DurableState{
 		Identities: s.db.s.Identities, Servers: s.db.s.Servers, Requests: s.db.s.V2Requests, Invites: s.db.s.V2Invites,
 		Groups: s.db.s.V2Groups, Posts: s.db.s.V2Posts, Notifications: s.db.s.V2Notifications,
 		Activities: s.db.s.V2Activities, Followers: s.db.s.Followers, Reactions: s.db.s.Reactions,
 		GroupMessages: s.db.s.GroupMessages, Comments: s.db.s.Comments, CommentPosts: s.db.s.CommentPosts, CommentsByPost: s.db.s.CommentsByPost,
-	})
+	}
+	plain, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	var compressed bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
+	if err != nil {
+		return err
+	}
+	if _, err = writer.Write(plain); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err = writer.Close(); err != nil {
+		return err
+	}
+	return s.db.appendEventBytes("v2_state_gzip", compressed.Bytes())
 }
 func (s *server) v2AddMemberLocked(sr *v2ServerRecord, id, role string) {
 	if sr.Members == nil {
@@ -565,6 +585,20 @@ func (db *store) applyV2(typ string, raw []byte) error {
 		db.s.V2Notifications = map[string][]*v2Notification{}
 	}
 	switch typ {
+	case "v2_state_gzip":
+		reader, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return err
+		}
+		plain, err := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		return db.applyV2("v2_state", plain)
 	case "v2_state":
 		var x v2DurableState
 		if json.Unmarshal(raw, &x) == nil {

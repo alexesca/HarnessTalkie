@@ -322,8 +322,15 @@ func (db *store) appendEvent(typ string, value any) error {
 	if err != nil {
 		return err
 	}
+	return db.appendEventBytes(typ, plain)
+}
+
+func (db *store) appendEventBytes(typ string, plain []byte) error {
+	if db.path == "" {
+		return nil
+	}
 	nonce := make([]byte, db.aead.NonceSize())
-	if _, err = rand.Read(nonce); err != nil {
+	if _, err := rand.Read(nonce); err != nil {
 		return err
 	}
 	ciphertext := db.aead.Seal(nil, nonce, plain, []byte(typ))
@@ -373,6 +380,9 @@ func remove(xs []string, x string) []string {
 }
 
 func (db *store) apply(typ string, raw []byte) error {
+	if typ == "v2_state_gzip" {
+		return db.applyV2(typ, raw)
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return err
