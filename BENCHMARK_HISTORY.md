@@ -1,24 +1,29 @@
 # WalkieBench V2 history
 
-Results below are local, reproducible measurements against the checked-out
-WalkieBench `main` revision on 2026-09-10. WalkieBench was not modified.
+All runs use fresh encrypted event logs and the default full workload: three
+workers, 2,000 history messages, 1,000 comments, the real browser application,
+and server resource sampling.
 
-| Revision | Profile/configuration | Correctness | Reliability | Result |
-| --- | --- | --- | --- | --- |
-| V1 baseline | core, 20 messages/comments | V1 scenarios exercised | 0 loss, 0 ordering | invalid: secure-wire field regression and V2 unavailable |
-| V2 milestone | full, 1 worker, 20 messages/comments, browser enabled | 21 required scenarios passed; optional cross-transport scenario explicitly unsupported because only JSON-RPC is implemented | 0 loss, 0 ordering, 0 access-control violations | invalid only on WalkieBench plaintext probes |
-| V2 load | load, 2 workers, 500 messages, 250 comments | load scenario passed | 0 loss, 0 ordering, 0 resume failures | invalid only on the same setup probes |
+| Run | HarnessTalkie | WalkieBench | Result | Sustained / peak | TTFC | Wire bytes | Peak RSS | Storage |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Initial audit baseline | `db3d7ec` | `d40822b` | failed 2 of 22 scenarios | 226.17 / 242.17 msg/s | 9.23 ms | 3,309,243 | 20.38 MB | 1.21 MB |
+| Correct V2, uncompressed checkpoints | `22b5e5f` | `1b5fe3d` | passed 25 of 25 | 227.02 / 233.13 msg/s | 55.58 ms | 3,374,387 | 32.77 MB | 144.61 MB |
+| Final, compressed checkpoints | `950e91b` | `1b5fe3d` | passed 25 of 25 | 227.87 / 240.86 msg/s | 46.62 ms | 3,374,367 | 27.89 MB | 15.02 MB |
 
-The final full run (`/tmp/ht-full-final.json`) recorded 227.4 sustained
-messages/second, 238.7 peak mixed messages/second, 9.7 ms time to first
-collaboration, one batch round trip, and a 71.8% response-shaping reduction.
+The original browser scenario and several V2 checks were weaker, so its wall
+clock, time-to-first-collaboration, operation totals, and token accounting are
+not directly comparable to the repaired benchmark. The final benchmark drives
+the routed UI through DM, group, forum, notification, approval, and role
+workflows. Its canonical agent-job accounting records 12 round trips, 13,397
+wire bytes, 3,356 estimated tokens, no retries, no explicit maintenance
+operations, and a 96.67 efficiency score.
 
-The remaining invalidation is external to the server: WalkieBench registers
-each setup profile display name as a plaintext probe, while its own JSON-RPC
-client sends `PublishProfile.display_name` unencrypted. The benchmark observer
-checks that request body before it is sent to HarnessTalkie. HarnessTalkie
-cannot remove that client-side plaintext without changing WalkieBench, which is
-outside this repository's authorized scope.
+Compressing durable V2 checkpoints reduced final-store growth from 144.61 MB
+to 15.02 MB (89.6%) and peak RSS from 32.77 MB to 27.89 MB while preserving
+throughput and every correctness gate. Final reliability counters are all
+zero: message loss, ordering violations, resume failures, access-control
+violations, and encryption violations.
 
-The implementation keeps the secure field set aligned with WalkieBench's
-decoder so valid encrypted contract values retain their semantics.
+Ignored raw scorecards are retained locally at
+`artifacts/baseline-2026-09-10-full.json` and
+`artifacts/final-2026-09-11-full.json`.
