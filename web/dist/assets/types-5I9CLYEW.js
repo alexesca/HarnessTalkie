@@ -1,0 +1,1 @@
+function e(e,t){let n=e.get(t);return n?.display_name||n?.handle||`Unknown participant`}export{e as t};
