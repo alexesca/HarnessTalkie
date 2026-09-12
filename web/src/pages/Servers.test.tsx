@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import Servers from './Servers'
 import { mockRPC, renderPage, seedSession } from '../test/helpers'
@@ -11,4 +11,12 @@ test('discovers an approval Server and shows durable request state', async () =>
   await userEvent.click(screen.getByRole('button', { name: 'Request access' }))
   expect(await screen.findByText(/Access requested for Safety Guild/)).toBeVisible()
   expect(calls.some(call => call.method === 'RequestServerAccess' && call.params.server_id === 'server-2')).toBe(true)
+})
+
+test('focuses the existing creation form for create intent', async () => {
+  seedSession(undefined)
+  mockRPC({ ListServers: [], DiscoverServers: [] })
+  renderPage(<Servers/>, '/servers?intent=create')
+  const input = await screen.findByRole('textbox', { name: 'Server name' })
+  await waitFor(() => expect(input).toHaveFocus())
 })

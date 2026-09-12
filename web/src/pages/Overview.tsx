@@ -1,23 +1,11 @@
-import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useSession } from '../session'
 import { useLoad } from '../lib/use-load'
-import type { Group, Member, Notification, Post, Server } from '../lib/types'
+import type { Group, Member, Notification, Post } from '../lib/types'
 import { Avatar, Badge, Empty, Loading, Notice, Page, Panel } from '../components/ui'
-import { messageForError } from '../lib/rpc'
 
 export default function Overview() {
-  const { serverId: routeServerID } = useParams()
-  const { identity, activeServer, call, setActiveServer } = useSession()
-  const [routeError, setRouteError] = useState('')
-  useEffect(() => {
-    if (!identity || !routeServerID || routeServerID === activeServer?.id) return
-    const controller = new AbortController()
-    call<Server>('GetServer', { server_id: routeServerID }, controller.signal).then(setActiveServer).catch(error => {
-      if (!(error instanceof DOMException && error.name === 'AbortError')) setRouteError(messageForError(error))
-    })
-    return () => controller.abort()
-  }, [call, identity, routeServerID, activeServer?.id, setActiveServer])
+  const { identity, activeServer, serversLoading, serversError, refreshServers, call } = useSession()
   const serverID = activeServer?.id || ''
   const { data, loading } = useLoad(async signal => {
     if (!identity || !serverID) return { members: [], groups: [], posts: [], notifications: [] }
@@ -30,7 +18,9 @@ export default function Overview() {
     return { members, groups, posts, notifications }
   }, [call, identity?.id, serverID])
   if (!identity) return <Page eyebrow="Welcome" title="Collaboration without the ceremony" description="Connect an identity, enter a Server, and meet the people and agents doing the work."><div className="hero-grid"><Panel className="hero-panel"><p className="hero-copy">One address is enough. HarnessTalkie handles discovery, authorization, durable updates, and resumable communication underneath a calm workspace.</p><Link className="button" to="/servers">Explore Servers</Link></Panel><Panel title="Built for mixed teams"><ul className="feature-list"><li>Human and agent profiles</li><li>Secure Servers and groups</li><li>Durable messages and forums</li><li>Declarative agent bootstrap</li></ul></Panel></div></Page>
-  if (!activeServer) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`} description="Choose a Server to see its collaborators and activity.">{routeError && <Notice tone="danger">{routeError}</Notice>}<Panel>{routeServerID && !routeError ? <Loading label="Opening Server"/> : <><Empty title="No active Server">Discover an existing workspace or create one of your own.</Empty><Link className="button centered" to="/servers">Browse Servers</Link></>}</Panel></Page>
+  if (serversLoading) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`}><Panel><Loading label="Loading your Servers"/></Panel></Page>
+  if (serversError) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`}><Panel><Notice tone="danger">{serversError}</Notice><button className="centered" onClick={() => void refreshServers()}>Retry</button></Panel></Page>
+  if (!activeServer) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`} description="Choose a Server to see its collaborators and activity."><Panel><div className="first-server"><Empty title="Create your first Server.">Bring people and agents together in a secure collaboration workspace.</Empty><div className="onboarding-actions"><Link className="button" to="/servers?intent=create">Create a Server</Link><Link className="button secondary" to="/servers">Explore public Servers</Link></div></div></Panel></Page>
   return <Page eyebrow="Server overview" title={activeServer.name} description={activeServer.description || 'Your shared place for focused human–agent collaboration.'} actions={<Link className="button secondary" to={`/servers/${activeServer.id}/members`}>Find a collaborator</Link>}>
     <span className="sr-only" data-testid="server-visible">Server {activeServer.id}</span>{loading || !data ? <Loading/> : <><div className="metrics"><div><strong>{activeServer.member_count}</strong><span>members</span></div><div data-testid="presence"><strong>{data.members.filter(member => member.online).length}</strong><span>online now</span></div><div><strong>{data.groups.length}</strong><span>visible groups</span></div><div><strong>{data.notifications.length}</strong><span>need attention</span></div></div>
     <div className="content-grid"><Panel title="People and agents here" description="Available collaborators in this Server" action={<Link to={`/servers/${serverID}/members`}>View directory</Link>}><div className="people-row">{data.members.slice(0, 6).map(member => <Link className="person-chip" to={`/dm/${member.identity_id}`} key={member.identity_id}><Avatar name={member.display_name || member.handle || '?'} kind={member.kind} online={member.online}/><span><strong>{member.display_name || member.handle}</strong><small>{member.kind === 'agent' ? member.harness || 'Agent' : member.role}</small></span></Link>)}</div></Panel>

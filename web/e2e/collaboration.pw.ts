@@ -39,6 +39,17 @@ test.describe('human collaboration application', () => {
       discoverable: true,
       tags: ['e2e'],
     }, identity.session_token)
+    const secondServer = await rpc<Server>(request, 'CreateServer', {
+      name: `Alternate workspace ${suffix}`,
+      description: 'A second workspace for rail switching',
+      join_policy: 'public',
+      discoverable: true,
+    }, identity.session_token)
+    for (let index = 0; index < 5; index++) await rpc(request, 'CreateServer', {
+      name: `Rail workspace ${index + 1} ${suffix}`,
+      join_policy: 'closed',
+      discoverable: false,
+    }, identity.session_token)
     const peer = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: peerName })
     await rpc(request, 'JoinServer', { server_id: server.id }, peer.session_token)
 
@@ -46,7 +57,18 @@ test.describe('human collaboration application', () => {
     await expect(page.getByRole('heading', { name: /Collaboration without the ceremony/i })).toBeVisible()
     await connect(page, identityName, identity.session_token)
 
-    await page.getByRole('link', { name: 'Servers', exact: true }).click()
+    await page.getByRole('button', { name: serverName }).click()
+    await expect(page.getByRole('button', { name: serverName })).toHaveAttribute('aria-current', 'page')
+    await page.getByRole('button', { name: secondServer.name }).click()
+    await expect(page).toHaveURL(new RegExp(`/servers/${secondServer.id}/overview$`))
+    await expect(page.getByRole('button', { name: secondServer.name })).toHaveAttribute('aria-current', 'page')
+    await page.getByRole('button', { name: serverName }).click()
+    const geometry = await page.locator('.navigation-shell').evaluate(element => ({ width: element.getBoundingClientRect().width, left: document.querySelector('.workspace')!.getBoundingClientRect().left }))
+    expect(geometry.width).toBe(336)
+    expect(geometry.left).toBe(336)
+    expect(await page.getByTestId('joined-servers').evaluate(element => element.scrollHeight > element.clientHeight)).toBeTruthy()
+
+    await page.getByRole('link', { name: 'Explore Servers', exact: true }).click()
     await expect(page).toHaveURL(/\/servers$/)
     await expect(page.getByRole('heading', { name: 'Servers', exact: true })).toBeVisible()
     const serverCard = page.locator('.server-card').filter({ hasText: serverName })
@@ -105,8 +127,28 @@ test.describe('human collaboration application', () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
     await page.getByRole('button', { name: 'Open navigation' }).click()
+    await expect(page.getByRole('complementary', { name: 'Servers' })).toBeVisible()
+    await expect(page.getByRole('complementary', { name: 'Workspace navigation' })).toBeVisible()
     await expect(page.getByRole('link', { name: 'Forums', exact: true })).toBeVisible()
     await expect(page.getByRole('main')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Open navigation' })).toBeFocused()
+  })
+
+  test('onboards a connected identity with no joined Servers and focuses creation', async ({ page, request }) => {
+    const name = `First server user ${Date.now()}-${Math.floor(Math.random() * 10000)}`
+    const identity = await rpc<Identity>(request, 'CreateOrLoadIdentity', { identity: name })
+    await page.goto('/')
+    await connect(page, name, identity.session_token)
+    await expect(page.getByRole('heading', { name: 'Create your first Server.' })).toBeVisible()
+    await page.getByRole('link', { name: 'Create a Server', exact: true }).click()
+    await expect(page).toHaveURL(/\/servers\?intent=create$/)
+    await expect(page.getByRole('textbox', { name: 'Server name' })).toBeFocused()
+    await page.setViewportSize({ width: 360, height: 740 })
+    await page.getByRole('button', { name: 'Open navigation' }).click()
+    await expect(page.locator('.navigation-shell')).toHaveCSS('width', '336px')
+    const overflows = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('body *')].filter(element => element.getBoundingClientRect().right > innerWidth + 1).map(element => ({ tag: element.tagName, className: element.className, right: element.getBoundingClientRect().right })))
+    expect(overflows).toEqual([])
   })
 
   test('approves an agent and assigns its Server role through administration', async ({ page, request }) => {
