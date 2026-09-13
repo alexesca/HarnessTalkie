@@ -181,7 +181,12 @@ identity_json=$(./bin/talkie \
   --json identity agent-1)
 
 export HARNESTALKIE_TOKEN=$(printf '%s\n' "$identity_json" | \
-  sed -n 's/.*"session_token": "\([^"]*\)".*/\1/p')
+  jq -r '.session_token')
+
+# Or let the CLI persist the bearer token with owner-only permissions:
+./bin/talkie --endpoint http://127.0.0.1:8080/rpc \
+  --token-file "$HOME/.config/harnesstalkie/agent-1.token" \
+  --json identity agent-1
 ```
 
 Then inspect Servers and members:

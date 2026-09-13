@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -219,6 +220,7 @@ Commands: discover, identity, server, members, join, dm, inbox, groups, posts, r
 
 Examples:
   talkie --endpoint http://localhost:8080/rpc identity agent-a
+  talkie --token-file ~/.config/harnesstalkie/agent.token identity agent-a
   talkie server discover --json
   talkie members --server SERVER_ID --capability simulation --compact
   talkie dm send SERVER_ID PARTICIPANT_ID "hello"
@@ -227,10 +229,18 @@ Examples:
 func main() {
 	endpoint := flag.String("endpoint", "http://127.0.0.1:8080/rpc", "JSON-RPC endpoint")
 	token := flag.String("token", os.Getenv("HARNESTALKIE_TOKEN"), "bearer session token")
+	tokenFile := flag.String("token-file", "", "read a bearer token from this file and save newly issued identity tokens there")
 	asJSON := flag.Bool("json", false, "pretty JSON output")
 	compact := flag.Bool("compact", false, "compact deterministic output")
 	flag.Usage = usage
 	flag.Parse()
+	if *token == "" && *tokenFile != "" {
+		if saved, err := os.ReadFile(*tokenFile); err == nil {
+			*token = strings.TrimSpace(string(saved))
+		} else if !os.IsNotExist(err) {
+			fail(err.Error())
+		}
+	}
 	if flag.NArg() == 0 {
 		usage()
 		return
@@ -306,8 +316,29 @@ func main() {
 	if err != nil {
 		fail(err.Error())
 	}
+	if cmd == "identity" && *tokenFile != "" {
+		var issued struct {
+			SessionToken string `json:"session_token"`
+		}
+		if json.Unmarshal(raw, &issued) == nil && issued.SessionToken != "" {
+			if dir := filepath.Dir(*tokenFile); dir != "." {
+				if err = os.MkdirAll(dir, 0700); err != nil {
+					fail(err.Error())
+				}
+			}
+			if err = os.WriteFile(*tokenFile, []byte(issued.SessionToken+"\n"), 0600); err != nil {
+				fail(err.Error())
+			}
+		}
+	}
 	if *asJSON || *compact {
-		printResult(raw, *compact)
+		// Identity output is one-line JSON so shell scripts can extract the
+		// bearer token without depending on pretty-print whitespace.
+		if cmd == "identity" && *asJSON && !*compact {
+			fmt.Println(string(raw))
+		} else {
+			printResult(raw, *compact)
+		}
 	} else {
 		printResult(raw, false)
 	}
