@@ -35,10 +35,11 @@ export function SessionProvider({ children }: PropsWithChildren) {
     if (server) localStorage.setItem('ht.active-server.v2', JSON.stringify(server))
     else localStorage.removeItem('ht.active-server.v2')
   }, [])
-  const loadServers = useCallback(async (token?: string) => {
+  const loadServers = useCallback(async (token?: string, background = false) => {
     if (!token) { setServers([]); setServersLoading(false); setServersError(''); setActiveServer(undefined); return [] }
     loadedToken.current = token
-    setServersLoading(true); setServersError('')
+    if (!background) setServersLoading(true)
+    setServersError('')
     try {
       const next = await rpc<Server[]>('ListServers', { limit: 200 }, token) || []
       setServers(next)
@@ -47,18 +48,13 @@ export function SessionProvider({ children }: PropsWithChildren) {
       setActiveServer(selected)
       return next
     } catch (reason) {
-      setServers([]); setActiveServer(undefined)
+      if (!background) { setServers([]); setActiveServer(undefined) }
       setServersError(reason instanceof Error ? reason.message : 'Unable to load your Servers')
       throw reason
-    } finally { setServersLoading(false) }
+    } finally { if (!background) setServersLoading(false) }
   }, [setActiveServer])
-  const refreshServers = useCallback(() => loadServers(identity?.session_token), [identity?.session_token, loadServers])
+  const refreshServers = useCallback(() => loadServers(identity?.session_token, true), [identity?.session_token, loadServers])
   useEffect(() => { if (identity?.session_token && loadedToken.current !== identity.session_token) void loadServers(identity.session_token).catch(() => {}) }, [identity?.session_token, loadServers])
-  useEffect(() => {
-    if (!identity?.session_token) return
-    const timer = window.setInterval(() => { void loadServers(identity.session_token).catch(() => {}) }, 10000)
-    return () => window.clearInterval(timer)
-  }, [identity?.session_token, loadServers])
   const connect = useCallback(async (name: string, password = '') => {
     const next = await rpc<Identity>('CreateOrLoadIdentity', { identity: name.trim() || 'human', password }, '')
     sessionStorage.setItem('ht.session.v2', JSON.stringify(next))

@@ -24,5 +24,5 @@ export function useLoad<T>(load: (signal: AbortSignal) => Promise<T>, dependenci
     const timer = window.setInterval(() => { void refresh() }, pollMs)
     return () => window.clearInterval(timer)
   }, [pollMs, refresh])
-  return { data, error, loading, refresh: () => refresh() }
+  return { data, error, loading, refresh }
 }

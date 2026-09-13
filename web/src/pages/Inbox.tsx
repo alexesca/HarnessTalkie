@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { useSession } from '../session'
 import { messageForError } from '../lib/rpc'
 import { useLoad } from '../lib/use-load'
+import { useEventStream } from '../lib/use-event-stream'
 import type { Member, Message, TypingIndicator } from '../lib/types'
 import { Avatar, Empty, Loading, Notice, Page } from '../components/ui'
 
@@ -22,7 +23,9 @@ export default function Inbox() {
     const messagesPromise = selected ? call<Message[]>('GetDMHistory', { server_id: activeServer.id, with: selected }, signal) : Promise.resolve([])
     const [serverMembers, incoming, messages] = await Promise.all([membersPromise, incomingPromise, messagesPromise])
     return { members: (serverMembers || []).filter(member => member.identity_id !== identity.id), messages: messages || [], incoming: incoming || [] }
-  }, [call, identity?.id, activeServer?.id, selected], 3000)
+  }, [call, identity?.id, activeServer?.id, selected])
+  const { event } = useEventStream(Boolean(identity && activeServer))
+  useEffect(() => { if (event?.type === 'dm' && (!event.message?.server_id || event.message.server_id === activeServer?.id)) void refresh() }, [event, activeServer?.id, refresh])
   useEffect(() => {
     if (!selected && data?.incoming.length) setSelected(data.incoming[data.incoming.length - 1].sender_id)
   }, [data?.incoming, selected])

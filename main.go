@@ -1076,6 +1076,66 @@ func (s *server) waitForEvents(ctx context.Context, caller string, raw json.RawM
 		}
 	}
 }
+
+// serveEvents exposes the durable event cursor as a standards-compliant SSE
+// stream. Clients keep one scoped stream open and update only the affected
+// view instead of reloading the application shell.
+func (s *server) serveEvents(w http.ResponseWriter, r *http.Request) {
+	caller, err := s.auth(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming is unavailable", http.StatusInternalServerError)
+		return
+	}
+	s.db.mu.RLock()
+	activityIndex := len(s.db.s.Activities)
+	lastHeartbeat := time.Now()
+	s.db.mu.RUnlock()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case now := <-ticker.C:
+			s.db.mu.Lock()
+			if activityIndex > len(s.db.s.Activities) {
+				activityIndex = len(s.db.s.Activities)
+			}
+			pending := append([]ActivityEvent(nil), s.db.s.Activities[activityIndex:]...)
+			activityIndex = len(s.db.s.Activities)
+			visible := make([]ActivityEvent, 0, len(pending))
+			for _, event := range pending {
+				if s.eventVisibleLocked(caller, event) {
+					visible = append(visible, event)
+				}
+			}
+			s.db.touch(caller)
+			s.db.mu.Unlock()
+			for _, event := range visible {
+				payload, marshalErr := json.Marshal(event)
+				if marshalErr != nil {
+					continue
+				}
+				_, _ = fmt.Fprintf(w, "event: collaboration\ndata: %s\n\n", payload)
+				flusher.Flush()
+			}
+			if now.Sub(lastHeartbeat) >= 5*time.Second {
+				_, _ = io.WriteString(w, "event: heartbeat\ndata: {}\n\n")
+				flusher.Flush()
+				lastHeartbeat = now
+			}
+		}
+	}
+}
+
 func (s *server) markReadLocked(caller string, ids []string) error {
 	if err := s.db.appendEvent("read", map[string]any{"id": caller, "messages": ids}); err != nil {
 		return err
@@ -1100,6 +1160,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.URL.Path == "/events" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.serveEvents(w, r)
 		return
 	}
 	if r.URL.Path != "/rpc" {

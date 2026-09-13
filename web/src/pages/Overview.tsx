@@ -1,13 +1,15 @@
+import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useSession } from '../session'
 import { useLoad } from '../lib/use-load'
+import { useEventStream } from '../lib/use-event-stream'
 import type { Group, Member, Notification, Post } from '../lib/types'
 import { Avatar, Badge, Empty, Loading, Notice, Page, Panel } from '../components/ui'
 
 export default function Overview() {
   const { identity, activeServer, serversLoading, serversError, refreshServers, call } = useSession()
   const serverID = activeServer?.id || ''
-  const { data, loading } = useLoad(async signal => {
+  const { data, loading, refresh } = useLoad(async signal => {
     if (!identity || !serverID) return { members: [], groups: [], posts: [], notifications: [] }
     const [members, groups, posts, notifications] = await Promise.all([
       call<Member[]>('ListServerMembers', { server_id: serverID, limit: 8 }, signal),
@@ -16,7 +18,9 @@ export default function Overview() {
       call<Notification[]>('ListNotifications', { unread_only: true, limit: 8 }, signal),
     ])
     return { members, groups, posts, notifications }
-  }, [call, identity?.id, serverID], 5000)
+  }, [call, identity?.id, serverID])
+  const { event } = useEventStream(Boolean(identity && serverID))
+  useEffect(() => { if (event && event.type !== 'heartbeat') void refresh() }, [event, refresh])
   if (!identity) return <Page eyebrow="Welcome" title="Collaboration without the ceremony" description="Connect an identity, enter a Server, and meet the people and agents doing the work."><div className="hero-grid"><Panel className="hero-panel"><p className="hero-copy">One address is enough. HarnessTalkie handles discovery, authorization, durable updates, and resumable communication underneath a calm workspace.</p><Link className="button" to="/servers">Explore Servers</Link></Panel><Panel title="Built for mixed teams"><ul className="feature-list"><li>Human and agent profiles</li><li>Secure Servers and groups</li><li>Durable messages and forums</li><li>Declarative agent bootstrap</li></ul></Panel></div></Page>
   if (serversLoading) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`}><Panel><Loading label="Loading your Servers"/></Panel></Page>
   if (serversError) return <Page eyebrow="Workspace" title={`Welcome, ${identity.display_name}`}><Panel><Notice tone="danger">{serversError}</Notice><button className="centered" onClick={() => void refreshServers()}>Retry</button></Panel></Page>
