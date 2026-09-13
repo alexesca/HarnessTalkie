@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -183,6 +185,78 @@ func TestDiscoveryCursorAndIdempotency(t *testing.T) {
 	}
 	if len(page.(MessagePage).Messages) != 0 {
 		t.Fatalf("acked page = %#v", page)
+	}
+}
+
+func TestEventStreamReplaysScopedSecureEvents(t *testing.T) {
+	db, err := newStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{db: db, idle: time.Hour}
+	a, b := testIdentity(t, s, "stream-owner"), testIdentity(t, s, "stream-agent")
+	created, err := s.dispatch(context.Background(), a.ID, "CreateServer", rpcParams(map[string]any{"name": "Stream workspace", "join_policy": "public"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverID := created.(v2Server).ID
+	if _, err = s.dispatch(context.Background(), b.ID, "JoinServer", rpcParams(map[string]string{"server_id": serverID})); err != nil {
+		t.Fatal(err)
+	}
+	boot, err := s.dispatch(context.Background(), b.ID, "Bootstrap", rpcParams(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := boot.(Bootstrap).Cursor
+	if _, err = s.dispatch(context.Background(), a.ID, "SendDM", rpcParams(SendDMRequest{ServerID: serverID, To: b.ID, Content: "offline message"})); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events?after="+strconv.FormatUint(start, 10)+"&server_id="+serverID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+b.SessionToken)
+	req.Header.Set("X-HarnessTalkie-Secure", "aesgcm-v1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d", resp.StatusCode)
+	}
+	reader := bufio.NewReader(resp.Body)
+	var payload string
+	for i := 0; i < 20 && payload == ""; i++ {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "data:") {
+			payload = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+	}
+	if payload == "" {
+		t.Fatal("stream did not replay an event")
+	}
+	opened, err := secureWireJSON(json.RawMessage(payload), b.SessionToken, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event ActivityEvent
+	if err = json.Unmarshal(opened, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "dm" || event.Message == nil || event.Message.Content != "offline message" {
+		t.Fatalf("replayed event = %#v", event)
+	}
+	if strings.Contains(payload, "offline message") {
+		t.Fatal("secure stream leaked message content")
 	}
 }
 

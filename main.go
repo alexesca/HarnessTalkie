@@ -122,14 +122,16 @@ type EventQuery struct {
 	Ack           bool   `json:"ack,omitempty"`
 }
 type ActivityEvent struct {
-	Type      string    `json:"type"`
-	ID        string    `json:"id"`
-	ActorID   string    `json:"actor_id"`
-	TargetID  string    `json:"target_id,omitempty"`
-	Sequence  uint64    `json:"sequence"`
-	CreatedAt time.Time `json:"created_at"`
-	Summary   string    `json:"summary,omitempty"`
-	Message   *Message  `json:"message,omitempty"`
+	Type        string    `json:"type"`
+	ID          string    `json:"id"`
+	ServerID    string    `json:"server_id,omitempty"`
+	ActorID     string    `json:"actor_id"`
+	TargetID    string    `json:"target_id,omitempty"`
+	RecipientID string    `json:"recipient_id,omitempty"`
+	Sequence    uint64    `json:"sequence"`
+	CreatedAt   time.Time `json:"created_at"`
+	Summary     string    `json:"summary,omitempty"`
+	Message     *Message  `json:"message,omitempty"`
 }
 type EventBatch struct {
 	Events     []ActivityEvent `json:"events"`
@@ -438,7 +440,7 @@ func (db *store) apply(typ string, raw []byte) error {
 			db.s.DMByClientID[m.SenderID+"\x00"+m.ClientMessageID] = &m
 		}
 		db.s.Next = max(db.s.Next, m.Sequence)
-		db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: &m})
+		db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ServerID: m.ServerID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: &m})
 	case "read":
 		id := str("id")
 		var ids []string
@@ -996,14 +998,33 @@ func (s *server) resolveParticipantLocked(query string) *identityRecord {
 	return nil
 }
 func (s *server) eventVisibleLocked(caller string, e ActivityEvent) bool {
+	if e.RecipientID != "" && e.RecipientID != caller && e.ActorID != caller {
+		return false
+	}
+	// V2 events carry their Server explicitly. Never expose those events to a
+	// connected identity after it loses membership, even when the event is not
+	// a DM (audit, forum, presence, and membership events included).
+	if e.ServerID != "" {
+		sr := s.db.s.Servers[e.ServerID]
+		if sr == nil || !v2IsMember(sr, caller) {
+			return false
+		}
+	}
 	if e.Type == "dm" && e.Message != nil {
 		sr := s.db.s.Servers[e.Message.ServerID]
 		return sr != nil && v2IsMember(sr, caller) && (e.Message.SenderID == caller || e.Message.RecipientID == caller)
+	}
+	if e.Type == "dm" {
+		return e.TargetID == caller || e.ActorID == caller
 	}
 	if e.Type == "invite" {
 		return e.TargetID == caller || e.ActorID == caller
 	}
 	if e.Type == "group_message" {
+		if e.ServerID != "" {
+			g := s.db.s.V2Groups[e.TargetID]
+			return g != nil && g.Members[caller]
+		}
 		g := s.db.s.Groups[e.TargetID]
 		return g != nil && contains(g.Members, caller)
 	}
@@ -1089,14 +1110,52 @@ func (s *server) serveEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming is unavailable", http.StatusInternalServerError)
 		return
 	}
-	s.db.mu.RLock()
-	activityIndex := len(s.db.s.Activities)
+	// A missing cursor intentionally starts at the current tail for browser
+	// consumers. Headless agents pass `after` (or Last-Event-ID) and receive a
+	// replay of every authorized event they missed while disconnected.
+	cursor := uint64(0)
+	if value := r.URL.Query().Get("after"); value != "" {
+		cursor, _ = strconv.ParseUint(value, 10, 64)
+	} else if value := r.Header.Get("Last-Event-ID"); value != "" {
+		cursor, _ = strconv.ParseUint(value, 10, 64)
+	} else {
+		s.db.mu.RLock()
+		cursor = s.db.s.Next
+		s.db.mu.RUnlock()
+	}
+	secureStream := r.Header.Get("X-HarnessTalkie-Secure") == "aesgcm-v1"
+	token := s.tokenFor(caller)
+	streamServerID := r.URL.Query().Get("server_id")
+	if streamServerID != "" {
+		s.db.mu.RLock()
+		sr := s.db.s.Servers[streamServerID]
+		allowed := sr != nil && v2IsMember(sr, caller)
+		s.db.mu.RUnlock()
+		if !allowed {
+			http.Error(w, "server membership required", http.StatusForbidden)
+			return
+		}
+	}
 	lastHeartbeat := time.Now()
+	presenceSnapshot := map[string]bool{}
+	s.db.mu.RLock()
+	for serverID, sr := range s.db.s.Servers {
+		if streamServerID != "" && streamServerID != serverID {
+			continue
+		}
+		if !v2IsMember(sr, caller) {
+			continue
+		}
+		for identityID := range sr.Members {
+			presenceSnapshot[serverID+"\x00"+identityID] = s.online(identityID)
+		}
+	}
 	s.db.mu.RUnlock()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -1106,25 +1165,59 @@ func (s *server) serveEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case now := <-ticker.C:
 			s.db.mu.Lock()
-			if activityIndex > len(s.db.s.Activities) {
-				activityIndex = len(s.db.s.Activities)
+			visible, _ := s.eventsLocked(caller, cursor, 100)
+			if streamServerID != "" {
+				filtered := visible[:0]
+				for _, event := range visible {
+					if event.ServerID == streamServerID || (event.ServerID == "" && event.Message != nil && event.Message.ServerID == streamServerID) {
+						filtered = append(filtered, event)
+					}
+				}
+				visible = filtered
 			}
-			pending := append([]ActivityEvent(nil), s.db.s.Activities[activityIndex:]...)
-			activityIndex = len(s.db.s.Activities)
-			visible := make([]ActivityEvent, 0, len(pending))
-			for _, event := range pending {
-				if s.eventVisibleLocked(caller, event) {
-					visible = append(visible, event)
+			// Presence is deliberately ephemeral: transitions are emitted to
+			// current subscribers but are not written to the durable event log.
+			// That keeps the log small while making online/away changes visible
+			// without polling the whole application.
+			for serverID, sr := range s.db.s.Servers {
+				if streamServerID != "" && streamServerID != serverID {
+					continue
+				}
+				if !v2IsMember(sr, caller) {
+					continue
+				}
+				for identityID := range sr.Members {
+					key := serverID + "\x00" + identityID
+					online := s.online(identityID)
+					previous, seen := presenceSnapshot[key]
+					presenceSnapshot[key] = online
+					if seen && previous != online {
+						seq, at := s.db.nextActivitySequence(), s.db.now()
+						visible = append(visible, ActivityEvent{Type: "presence", ID: s.db.nextID("presence"), ServerID: serverID, ActorID: identityID, TargetID: identityID, Sequence: seq, CreatedAt: at, Summary: map[bool]string{true: "came online", false: "went offline"}[online]})
+					}
+				}
+			}
+			if len(visible) > 0 {
+				for _, event := range visible {
+					if event.Sequence > cursor {
+						cursor = event.Sequence
+					}
 				}
 			}
 			s.db.touch(caller)
 			s.db.mu.Unlock()
 			for _, event := range visible {
-				payload, marshalErr := json.Marshal(event)
+				var payload []byte
+				var marshalErr error
+				if secureStream {
+					payload, marshalErr = secureWireJSON(event, token, true)
+				} else {
+					payload, marshalErr = json.Marshal(event)
+				}
 				if marshalErr != nil {
 					continue
 				}
-				_, _ = fmt.Fprintf(w, "event: collaboration\ndata: %s\n\n", payload)
+				_, _ = fmt.Fprintf(w, "id: %d\nevent: collaboration\ndata: %s\n\n", event.Sequence, payload)
 				flusher.Flush()
 			}
 			if now.Sub(lastHeartbeat) >= 5*time.Second {
@@ -1156,7 +1249,7 @@ func (s *server) markReadLocked(caller string, ids []string) error {
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-HarnessTalkie-Secure, Last-Event-ID")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -1453,7 +1546,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 		return out, nil
 	case "GetCapabilities":
-		return []string{"Bootstrap", "ListParticipants", "FindPeers", "ListInvites", "ListGroups", "ListPublicPosts", "Heartbeat", "Disconnect", "ConnectAndBootstrap", "WaitForEvents", "SendDM", "GetDMHistoryPage", "ReceiveDMsPage", "SetTyping", "GetTyping"}, nil
+		return []string{"Bootstrap", "ListParticipants", "FindPeers", "ListInvites", "ListGroups", "ListPublicPosts", "Heartbeat", "Disconnect", "ConnectAndBootstrap", "WaitForEvents", "SendDM", "GetDMHistoryPage", "ReceiveDMsPage", "SetTyping", "GetTyping", "SSEEvents", "ResumableCursor"}, nil
 	case "Heartbeat":
 		at := time.Now().UTC()
 		if err := s.db.commit("presence", map[string]any{"id": caller, "last_active": at}, func() {
@@ -1528,7 +1621,7 @@ func (s *server) dispatch(ctx context.Context, caller, method string, raw json.R
 			if m.ClientMessageID != "" {
 				s.db.s.DMByClientID[caller+"\x00"+m.ClientMessageID] = m
 			}
-			s.db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: m})
+			s.db.recordActivity(ActivityEvent{Type: "dm", ID: m.ID, ServerID: m.ServerID, ActorID: m.SenderID, TargetID: m.RecipientID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "direct message", Message: m})
 		}); err != nil {
 			return nil, err
 		}

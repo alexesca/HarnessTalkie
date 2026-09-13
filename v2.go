@@ -106,6 +106,7 @@ type v2ActivityRecord struct {
 	Event    ActivityEvent `json:"event"`
 }
 type v2DurableState struct {
+	Cursor         uint64                       `json:"cursor"`
 	Identities     map[string]*identityRecord   `json:"identities"`
 	Servers        map[string]*v2ServerRecord   `json:"servers"`
 	Requests       map[string]*v2ServerRequest  `json:"requests"`
@@ -452,7 +453,7 @@ func v2CanGroup(g *v2GroupRecord, caller, permission string) bool {
 }
 func v2Audit(s *server, serverID, typ, actor, target, summary string) uint64 {
 	seq, at := s.db.nextActivitySequence(), s.db.now()
-	e := ActivityEvent{Type: typ, ID: s.db.nextID("audit"), ActorID: actor, TargetID: target, Sequence: seq, CreatedAt: at, Summary: summary}
+	e := ActivityEvent{Type: typ, ID: s.db.nextID("audit"), ServerID: serverID, ActorID: actor, TargetID: target, Sequence: seq, CreatedAt: at, Summary: summary}
 	s.db.s.V2Activities = append(s.db.s.V2Activities, v2ActivityRecord{ServerID: serverID, Event: e})
 	s.db.recordActivity(e)
 	return seq
@@ -462,13 +463,14 @@ func (s *server) v2NotifyLocked(serverID, recipient, typ, actor, target, summary
 		return
 	}
 	seq, createdAt := s.db.nextActivitySequence(), s.db.now()
-	event := ActivityEvent{Type: typ, ID: s.db.nextID("notification-event"), ActorID: actor, TargetID: target, Sequence: seq, CreatedAt: createdAt, Summary: summary}
+	event := ActivityEvent{Type: typ, ID: s.db.nextID("notification-event"), ServerID: serverID, ActorID: actor, TargetID: target, RecipientID: recipient, Sequence: seq, CreatedAt: createdAt, Summary: summary}
 	s.db.s.V2Activities = append(s.db.s.V2Activities, v2ActivityRecord{ServerID: serverID, Event: event})
 	n := &v2Notification{ID: s.db.nextID("notification"), Type: typ, ActorID: actor, TargetID: target, ServerID: serverID, Summary: summary, Sequence: seq, CreatedAt: createdAt.Format(time.RFC3339Nano)}
 	s.db.s.V2Notifications[recipient] = append(s.db.s.V2Notifications[recipient], n)
 }
 func (s *server) v2PersistStateLocked() error {
 	state := v2DurableState{
+		Cursor:     s.db.s.Next,
 		Identities: s.db.s.Identities, Servers: s.db.s.Servers, Requests: s.db.s.V2Requests, Invites: s.db.s.V2Invites,
 		Groups: s.db.s.V2Groups, Posts: s.db.s.V2Posts, Notifications: s.db.s.V2Notifications,
 		Activities: s.db.s.V2Activities, Followers: s.db.s.Followers, Reactions: s.db.s.Reactions,
@@ -638,6 +640,7 @@ func (db *store) applyV2(typ string, raw []byte) error {
 	case "v2_state":
 		var x v2DurableState
 		if json.Unmarshal(raw, &x) == nil {
+			db.s.Next = max(db.s.Next, x.Cursor)
 			if x.Identities != nil {
 				db.s.Identities = x.Identities
 			}
@@ -661,6 +664,22 @@ func (db *store) applyV2(typ string, raw []byte) error {
 			}
 			if x.Activities != nil {
 				db.s.V2Activities = x.Activities
+				// V2 activity records live inside the compact state snapshot;
+				// rebuild the unified stream used by WaitForEvents and SSE so a
+				// process restart does not strand an agent's durable cursor.
+				known := map[string]bool{}
+				for _, event := range db.s.Activities {
+					known[event.ID] = true
+				}
+				for _, activity := range x.Activities {
+					if !known[activity.Event.ID] {
+						db.s.Activities = append(db.s.Activities, activity.Event)
+						known[activity.Event.ID] = true
+					}
+				}
+				sort.SliceStable(db.s.Activities, func(i, j int) bool {
+					return db.s.Activities[i].Sequence < db.s.Activities[j].Sequence
+				})
 			}
 			if x.Followers != nil {
 				db.s.Followers = x.Followers
@@ -1348,7 +1367,8 @@ func (s *server) v2DispatchLocked(ctx context.Context, caller, method string, ra
 		}
 		m := &Message{ID: s.db.nextID("msg"), SenderID: caller, GroupID: g.ID, Content: arg("content"), Sequence: s.db.s.Next, CreatedAt: s.db.now()}
 		s.db.s.GroupMessages[g.ID] = append(s.db.s.GroupMessages[g.ID], m)
-		e := ActivityEvent{Type: "group_message", ID: m.ID, ActorID: caller, TargetID: g.ID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "group message", Message: m}
+		m.ServerID = g.ServerID
+		e := ActivityEvent{Type: "group_message", ID: m.ID, ServerID: g.ServerID, ActorID: caller, TargetID: g.ID, Sequence: m.Sequence, CreatedAt: m.CreatedAt, Summary: "group message", Message: m}
 		s.db.s.V2Activities = append(s.db.s.V2Activities, v2ActivityRecord{ServerID: g.ServerID, Event: e})
 		s.db.recordActivity(e)
 		return *m, nil
@@ -2433,7 +2453,7 @@ func v2DiscoveryRequest(method string, raw json.RawMessage) (any, error) {
 	ops := []string{"CreateServer", "GetServer", "UpdateServer", "ListServers", "DiscoverServers", "JoinServer", "RequestServerAccess", "ApproveServerRequest", "RejectServerRequest", "InviteToServer", "AcceptServerInvite", "LeaveServer", "RemoveServerMember", "ListServerMembers", "GetServerMember", "ListServerRequests", "ListServerInvites", "FindServerMembers", "ListServerRoles", "SetServerRole", "UpdateServerPermissions", "GetServerAudit", "CreateGroup", "UpdateGroup", "DeleteGroup", "DiscoverGroups", "ListGroups", "JoinGroup", "RequestGroupAccess", "ApproveGroupRequest", "RejectGroupRequest", "InviteToGroup", "AcceptGroupInvite", "LeaveGroup", "RemoveGroupMember", "ListGroupMembers", "ListGroupRequests", "ListGroupInvites", "SetGroupRole", "UpdateGroupPermissions", "CreatePost", "EditPost", "Comment", "GetThread", "DiscoverPosts", "SearchPosts", "SharePost", "ListNotifications", "MarkNotificationsRead", "ApplyManifest", "Batch", "Sync"}
 	switch method {
 	case "DiscoverProtocol":
-		return map[string]any{"protocol": "harnesstalkie", "version": "2.0", "capabilities": []string{"servers", "membership", "permissions", "groups", "forums", "notifications", "manifests", "batch", "delta-sync", "response-shaping", "encrypted-jsonrpc"}, "operations": ops, "transports": []string{"jsonrpc"}, "schema_urls": []string{"/schema/harnesstalkie/v2"}, "documentation": []string{"/help"}, "auth_methods": []string{"bearer-session"}, "usage_hints": []string{"discover Server metadata before joining", "ApplyManifest bootstraps a session", "Sync returns authorized changes since a cursor"}}, nil
+		return map[string]any{"protocol": "harnesstalkie", "version": "2.0", "capabilities": []string{"servers", "membership", "permissions", "groups", "forums", "notifications", "manifests", "batch", "delta-sync", "response-shaping", "encrypted-jsonrpc", "realtime-events", "presence-leases", "resumable-streams"}, "operations": ops, "transports": []string{"jsonrpc", "sse"}, "schema_urls": []string{"/schema/harnesstalkie/v2"}, "documentation": []string{"/help"}, "auth_methods": []string{"bearer-session"}, "usage_hints": []string{"discover Server metadata before joining", "ApplyManifest bootstraps a session", "connect GET /events with Authorization and an after cursor", "Heartbeat renews the presence lease", "Sync returns authorized changes since a cursor"}}, nil
 	case "GetSchema":
 		operationSchemas := map[string]any{}
 		for _, operation := range ops {
@@ -2441,7 +2461,7 @@ func v2DiscoveryRequest(method string, raw json.RawMessage) (any, error) {
 		}
 		return map[string]any{"name": "harnesstalkie/v2", "version": "2.0", "schema": map[string]any{"type": "object", "required": []string{"apiVersion", "kind", "server", "identity"}, "properties": map[string]any{"apiVersion": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "server": map[string]any{"type": "string"}, "identity": map[string]any{"type": "object"}}}, "operations": operationSchemas}, nil
 	case "GetHelp":
-		return map[string]any{"commands": []string{"discover", "server", "members", "agents", "groups", "posts", "dm", "inbox", "requests", "invites", "roles", "permissions", "security", "status", "join"}, "examples": []string{"discover --json", "join SERVER_ID --json", "members --capability simulation --compact", "dm send SERVER_ID PARTICIPANT_ID MESSAGE"}, "manifest": "ApplyManifest", "batch": "Batch"}, nil
+		return map[string]any{"commands": []string{"discover", "server", "members", "agents", "groups", "posts", "dm", "inbox", "requests", "invites", "roles", "permissions", "security", "status", "join", "agent run", "agent doctor"}, "examples": []string{"discover --json", "join SERVER_ID --json", "members --capability simulation --compact", "dm send SERVER_ID PARTICIPANT_ID MESSAGE", "agent run session.json --token-file ~/.config/harnesstalkie/agent.token"}, "manifest": "ApplyManifest", "batch": "Batch", "stream": "GET /events?after=CURSOR"}, nil
 	case "ListPresets":
 		return []map[string]any{{"name": "minimal", "description": "identity and presence", "manifest": map[string]any{"apiVersion": "harnesstalkie/v2", "kind": "Session", "server": "server", "identity": map[string]any{"name": "agent"}}}, {"name": "collaborator", "description": "discover and synchronize collaboration", "manifest": map[string]any{"apiVersion": "harnesstalkie/v2", "kind": "Session", "server": "server", "identity": map[string]any{"name": "agent"}, "membership": map[string]any{"join": "if-allowed", "requestIfRequired": true}, "discover": map[string]any{"limit": 5}, "sync": map[string]any{"inbox": true, "mentions": true}}}}, nil
 	case "ApplyPreset":
@@ -2462,7 +2482,7 @@ func v2DiscoveryRequest(method string, raw json.RawMessage) (any, error) {
 		mergePresetOverrides(effective, p.Overrides)
 		return map[string]any{"preset": p.Preset, "effective": effective}, nil
 	case "ListTransports":
-		return []map[string]any{{"name": "jsonrpc", "read": true, "write": true, "streaming": false, "authenticated": true, "shared_state": true, "address": "/rpc"}}, nil
+		return []map[string]any{{"name": "jsonrpc", "read": true, "write": true, "streaming": false, "authenticated": true, "shared_state": true, "address": "/rpc"}, {"name": "sse", "read": true, "write": false, "streaming": true, "authenticated": true, "shared_state": true, "address": "/events", "cursor": "after or Last-Event-ID", "heartbeat_seconds": 5}}, nil
 	}
 	return nil, missing("unknown discovery method")
 }
